@@ -28,6 +28,7 @@ const metaLine = document.getElementById("meta-line");
 const metaSource = document.getElementById("meta-source");
 
 let refreshTimer = null;
+const openPremadeCards = new Set();
 
 function formatGold(value) {
   return `${Math.round(value)}g`;
@@ -247,9 +248,23 @@ function renderReplacement(payload) {
   replacementBody.appendChild(empty);
 }
 
+function getPremadeCardKey(member) {
+  return member.partyPuuid || member.matchedSummonerName || member.partyLabel || member.player.summonerName;
+}
+
 function buildPremadeCard(member) {
   const details = document.createElement("details");
   details.className = "panel premade-card";
+  const cardKey = getPremadeCardKey(member);
+  details.dataset.cardKey = cardKey;
+  details.open = openPremadeCards.has(cardKey);
+  details.addEventListener("toggle", () => {
+    if (details.open) {
+      openPremadeCards.add(cardKey);
+      return;
+    }
+    openPremadeCards.delete(cardKey);
+  });
 
   const itemStrip = member.player.items
     .map((item) => `<img src="${item.imageUrl}" alt="${item.name}" title="${item.name}" />`)
@@ -324,10 +339,17 @@ function renderPremades(payload) {
 
   if (!payload.premades || !payload.premades.detected || !payload.premades.members.length) {
     premadeSection.classList.add("hidden");
+    openPremadeCards.clear();
     return;
   }
 
   premadeSection.classList.remove("hidden");
+  const activeKeys = new Set(payload.premades.members.map((member) => getPremadeCardKey(member)));
+  for (const key of [...openPremadeCards]) {
+    if (!activeKeys.has(key)) {
+      openPremadeCards.delete(key);
+    }
+  }
   payload.premades.members.forEach((member) => {
     premadeGrid.appendChild(buildPremadeCard(member));
   });
