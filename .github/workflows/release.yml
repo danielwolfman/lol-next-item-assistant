@@ -2,6 +2,8 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
 
@@ -18,13 +20,38 @@ jobs:
           node-version: 24
           cache: npm
 
+      - name: Resolve release metadata
+        id: meta
+        shell: pwsh
+        run: |
+          if ("${{ github.ref }}".StartsWith("refs/tags/")) {
+            "tag_name=${{ github.ref_name }}" >> $env:GITHUB_OUTPUT
+            "release_name=${{ github.ref_name }}" >> $env:GITHUB_OUTPUT
+            "prerelease=false" >> $env:GITHUB_OUTPUT
+          } else {
+            $shortSha = "${{ github.sha }}".Substring(0, 7)
+            "tag_name=main-build-${{ github.run_number }}" >> $env:GITHUB_OUTPUT
+            "release_name=Main Build #${{ github.run_number }} ($shortSha)" >> $env:GITHUB_OUTPUT
+            "prerelease=true" >> $env:GITHUB_OUTPUT
+          }
+
       - name: Install dependencies
         run: npm ci
 
       - name: Build MSI
         run: npm run dist
 
-      - name: Upload release asset
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-msi-${{ steps.meta.outputs.tag_name }}
+          path: dist/*.msi
+
+      - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.meta.outputs.tag_name }}
+          name: ${{ steps.meta.outputs.release_name }}
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+          target_commitish: ${{ github.sha }}
           files: dist/*.msi
