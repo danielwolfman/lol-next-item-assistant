@@ -1102,16 +1102,6 @@ function computeDamageInfluence(player, itemMap) {
   );
 }
 
-function isAutoAttackThreat(player, itemMap) {
-  const offense = sumOffenseStats(player, itemMap);
-  return (
-    player.archetype === "marksman" ||
-    offense.crit >= 20 ||
-    offense.attackSpeed >= 22 ||
-    offense.ad >= 85
-  );
-}
-
 function computeThreatScore(player, itemMap) {
   const itemTotal = player.items.reduce((sum, itemId) => sum + Number(itemMap[itemId]?.gold?.total || 0), 0);
   const completedItems = player.items.filter((itemId) => Number(itemMap[itemId]?.gold?.total || 0) >= 2200).length;
@@ -1554,22 +1544,6 @@ function scoreItem(item, context) {
     }
   }
   if (
-    lowerName.includes("thornmail") &&
-    topThreat &&
-    topThreatIsPhysical &&
-    liveWeight >= 0.35 &&
-    (enemyField.healingPressure >= 0.55 || isAutoAttackThreat(topThreat, context.itemMap))
-  ) {
-    progressionBonus += ownedIds.has("3076") ? 6.5 : 0;
-    topThreatBonus += (5.5 + topThreatShare * 14 + topThreatLead * 10) * liveWeight;
-    if (isAutoAttackThreat(topThreat, context.itemMap)) {
-      topThreatBonus += 4.5 * liveWeight;
-    }
-    if (enemyField.healingPressure >= 0.75) {
-      topThreatBonus += 3.5 * liveWeight;
-    }
-  }
-  if (
     (context.self.archetype === "mage" ||
       context.self.archetype === "ap-assassin" ||
       context.self.archetype === "marksman" ||
@@ -1826,7 +1800,6 @@ async function buildPerspectiveForPlayer(player, staticData, shared, options = {
   const scoringContext = {
     self: player,
     ownedIds,
-    itemMap: staticData.items,
     enemyField: shared.enemyField,
     needs,
     gameMinutes: shared.gameMinutes,
