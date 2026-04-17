@@ -5,6 +5,12 @@ const statusCard = document.getElementById("status-card");
 const summaryGrid = document.getElementById("summary-grid");
 const recommendationsSection = document.getElementById("recommendations-section");
 const recommendationGrid = document.getElementById("recommendation-grid");
+const bootsCard = document.getElementById("boots-card");
+const bootsState = document.getElementById("boots-state");
+const bootsBody = document.getElementById("boots-body");
+const replacementCard = document.getElementById("replacement-card");
+const replacementState = document.getElementById("replacement-state");
+const replacementBody = document.getElementById("replacement-body");
 const playerHeading = document.getElementById("player-heading");
 const playerStats = document.getElementById("player-stats");
 const playerItems = document.getElementById("player-items");
@@ -85,6 +91,105 @@ function buildRecommendationCard(rec, index) {
   return card;
 }
 
+function buildBootCard(boots) {
+  const card = document.createElement("div");
+  card.className = "boot-card";
+
+  if (boots.state === "owned" && boots.current) {
+    card.innerHTML = `
+      <div class="item-header">
+        <img class="item-icon" src="${boots.current.imageUrl}" alt="${boots.current.name}" />
+        <div>
+          <h3>${boots.current.name}</h3>
+          <p class="muted">Boot slot already filled</p>
+        </div>
+      </div>
+      <div class="reason-list">
+        <p>You already own completed boots, so the main item list now focuses on non-boot upgrades.</p>
+      </div>
+    `;
+    return card;
+  }
+
+  if (boots.state === "recommended" && boots.recommendation) {
+    const rec = boots.recommendation;
+    card.innerHTML = `
+      <div class="item-header">
+        <img class="item-icon" src="${rec.imageUrl}" alt="${rec.name}" />
+        <div>
+          <h3>${rec.name}</h3>
+          <p class="muted">Score ${rec.totalScore.toFixed(1)} • ${formatGold(rec.totalGold)} total</p>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="card-metric-row">
+          <span>Missing gold</span>
+          <strong>${formatGold(rec.missingGold)}</strong>
+        </div>
+        <div class="card-metric-row">
+          <span>Key stats</span>
+          <strong>${renderStatLine(rec.stats)}</strong>
+        </div>
+        <div class="reason-list">
+          ${rec.reasons.map((reason) => `<p>${reason}</p>`).join("")}
+        </div>
+      </div>
+    `;
+    return card;
+  }
+
+  card.innerHTML = `
+    <div class="reason-list">
+      <p>No strong boot recommendation yet.</p>
+    </div>
+  `;
+  return card;
+}
+
+function buildReplacementCard(replacement) {
+  const card = document.createElement("div");
+  card.className = "replacement-body-grid";
+  card.innerHTML = `
+    <div class="swap-columns">
+      <div class="swap-item">
+        <p class="panel-label">Sell</p>
+        <div class="item-header">
+          <img class="item-icon" src="${replacement.sell.imageUrl}" alt="${replacement.sell.name}" />
+          <div>
+            <h3>${replacement.sell.name}</h3>
+            <p class="muted">Current score ${replacement.sell.totalScore.toFixed(1)}</p>
+          </div>
+        </div>
+      </div>
+      <div class="swap-arrow">→</div>
+      <div class="swap-item">
+        <p class="panel-label">Buy</p>
+        <div class="item-header">
+          <img class="item-icon" src="${replacement.buy.imageUrl}" alt="${replacement.buy.name}" />
+          <div>
+            <h3>${replacement.buy.name}</h3>
+            <p class="muted">Score ${replacement.buy.totalScore.toFixed(1)} • ${formatGold(replacement.buy.totalGold)} total</p>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <div class="card-metric-row">
+        <span>Net score shift</span>
+        <strong>${replacement.scoreGain >= 0 ? "+" : ""}${replacement.scoreGain.toFixed(1)}</strong>
+      </div>
+      <div class="card-metric-row">
+        <span>Missing gold</span>
+        <strong>${formatGold(replacement.buy.missingGold)}</strong>
+      </div>
+      <div class="reason-list">
+        ${replacement.reasons.map((reason) => `<p>${reason}</p>`).join("")}
+      </div>
+    </div>
+  `;
+  return card;
+}
+
 function renderStatLine(stats) {
   const parts = [];
   if (stats.ap) parts.push(`+${Math.round(stats.ap)} AP`);
@@ -98,6 +203,44 @@ function renderStatLine(stats) {
     return "utility / passive-heavy";
   }
   return parts.slice(0, 3).join(" • ");
+}
+
+function renderBoots(boots) {
+  bootsCard.classList.remove("hidden");
+  bootsBody.innerHTML = "";
+
+  if (boots.state === "owned") {
+    bootsState.textContent = "Completed";
+  } else if (boots.state === "recommended") {
+    bootsState.textContent = "Open slot";
+  } else {
+    bootsState.textContent = "No call";
+  }
+
+  bootsBody.appendChild(buildBootCard(boots));
+}
+
+function renderReplacement(payload) {
+  replacementBody.innerHTML = "";
+
+  if (!payload.player.fullBuild) {
+    replacementCard.classList.add("hidden");
+    return;
+  }
+
+  replacementCard.classList.remove("hidden");
+
+  if (payload.replacement && payload.replacement.active) {
+    replacementState.textContent = "Swap available";
+    replacementBody.appendChild(buildReplacementCard(payload.replacement));
+    return;
+  }
+
+  replacementState.textContent = "No better swap";
+  const empty = document.createElement("div");
+  empty.className = "reason-list";
+  empty.innerHTML = "<p>All six slots are completed, but there is no stronger situational swap from the current provider pool.</p>";
+  replacementBody.appendChild(empty);
 }
 
 function renderState(payload) {
@@ -130,7 +273,8 @@ function renderState(payload) {
     threatDamage.textContent = "-";
   }
 
-  metaLine.textContent = `Model: ${payload.meta.modelSummary}`;
+  const poolLabel = payload.meta.pool === "situational" ? "situational items" : "core/full build";
+  metaLine.textContent = `Model: ${payload.meta.modelSummary} Pool: ${poolLabel}.`;
   metaSource.textContent = "";
   const sourcePrefix = document.createTextNode("Meta reference: ");
   const sourceLink = document.createElement("a");
@@ -143,6 +287,12 @@ function renderState(payload) {
   if (payload.meta.source.note) {
     metaSource.appendChild(document.createTextNode(` (${payload.meta.source.note})`));
   }
+  if (payload.meta.providerStatus === "fallback" && payload.meta.providerError) {
+    metaSource.appendChild(document.createTextNode(` Fallback active: ${payload.meta.providerError}`));
+  }
+
+  renderBoots(payload.boots);
+  renderReplacement(payload);
 
   recommendationGrid.innerHTML = "";
   payload.recommendations.forEach((rec, index) => {
@@ -158,6 +308,8 @@ async function loadState() {
     if (!payload.ok) {
       recommendationsSection.classList.add("hidden");
       summaryGrid.classList.add("hidden");
+      bootsCard.classList.add("hidden");
+      replacementCard.classList.add("hidden");
       metaLine.textContent = "";
       metaSource.textContent = "";
       setStatus("Live feed unavailable.", payload.error || "Unknown error", false);
@@ -168,6 +320,8 @@ async function loadState() {
   } catch (error) {
     recommendationsSection.classList.add("hidden");
     summaryGrid.classList.add("hidden");
+    bootsCard.classList.add("hidden");
+    replacementCard.classList.add("hidden");
     metaLine.textContent = "";
     metaSource.textContent = "";
     setStatus("Request failed.", error.message, false);

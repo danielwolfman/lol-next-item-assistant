@@ -11,6 +11,7 @@ const CACHE_DIR = path.join(ROOT, ".cache");
 const PATCH_FILE = path.join(CACHE_DIR, "patch-version.json");
 const ITEMS_FILE = path.join(CACHE_DIR, "item-data.json");
 const CHAMPIONS_FILE = path.join(CACHE_DIR, "champion-data.json");
+const META_BUILD_TTL_MS = 1000 * 60 * 60 * 6;
 
 const STATIC_FILES = {
   "/": "index.html",
@@ -231,6 +232,20 @@ function championSlug(value) {
   return normalizeToken(value);
 }
 
+function unique(values) {
+  return [...new Set(values)];
+}
+
+function decodeHtmlEntities(text) {
+  return String(text || "")
+    .replace(/&#x27;/gi, "'")
+    .replace(/&#39;/gi, "'")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">");
+}
+
 function readJsonIfPresent(filePath) {
   if (!fs.existsSync(filePath)) {
     return null;
@@ -285,6 +300,106 @@ function httpGetJson(targetUrl, { insecure = false, timeoutMs = 4500 } = {}) {
     });
     req.on("error", reject);
   });
+}
+
+function httpGetText(targetUrl, { insecure = false, timeoutMs = 4500 } = {}) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(targetUrl);
+    const client = url.protocol === "https:" ? https : http;
+    const req = client.get(
+      {
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port: url.port || undefined,
+        path: `${url.pathname}${url.search}`,
+        rejectUnauthorized: !insecure,
+        timeout: timeoutMs,
+        headers: {
+          "User-Agent": "LoL-Item-Coach/0.2"
+        }
+      },
+      (res) => {
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => {
+          body += chunk;
+        });
+        res.on("end", () => {
+          if (res.statusCode < 200 || res.statusCode >= 300) {
+            reject(new Error(`HTTP ${res.statusCode} from ${targetUrl}`));
+            return;
+          }
+          resolve(body);
+        });
+      }
+    );
+
+    req.on("timeout", () => {
+      req.destroy(new Error(`Timed out requesting ${targetUrl}`));
+    });
+    req.on("error", reject);
+  });
+}
+
+function getMetaBuildCacheFile(slug) {
+  return path.join(CACHE_DIR, `mobalytics-build-${slug}.json`);
+}
+
+function readFreshMetaBuild(slug) {
+  const filePath = getMetaBuildCacheFile(slug);
+  const cached = readJsonIfPresent(filePath);
+  if (!cached || !cached.fetchedAt) {
+    return null;
+  }
+  if (Date.now() - Number(cached.fetchedAt) > META_BUILD_TTL_MS) {
+    return null;
+  }
+  return cached;
+}
+
+function extractSectionItemIds(html, headingText, { maxChars = 7000, limit = 12 } = {}) {
+  const lower = html.toLowerCase();
+  const index = lower.indexOf(String(headingText || "").toLowerCase());
+  if (index < 0) {
+    return [];
+  }
+  const slice = html.slice(index, index + maxChars);
+  const matches = [...slice.matchAll(/\/game-items\/(\d+)\.png/gi)].map((match) => String(match[1]));
+  return unique(matches).slice(0, limit);
+}
+
+async function loadMobalyticsBuild(player, staticData) {
+  const championId = player.champion?.id || player.championName;
+  const slug = championSlug(championId);
+  const cached = readFreshMetaBuild(slug);
+  if (cached) {
+    return cached;
+  }
+
+  ensureDir(CACHE_DIR);
+  const url = `https://mobalytics.gg/lol/champions/${slug}/build`;
+  const html = await httpGetText(url, { timeoutMs: 9000 });
+  const coreIds = extractSectionItemIds(html, "Core Items", { maxChars: 4000, limit: 6 });
+  const fullBuildIds = extractSectionItemIds(html, "Full Build", { maxChars: 5000, limit: 8 });
+  const situationalIds = extractSectionItemIds(html, "situational items", { maxChars: 3500, limit: 8 });
+
+  if (!coreIds.length && !fullBuildIds.length && !situationalIds.length) {
+    throw new Error(`Unable to parse Mobalytics build data for ${player.championName}.`);
+  }
+
+  const payload = {
+    provider: "Mobalytics",
+    url,
+    fetchedAt: Date.now(),
+    champion: decodeHtmlEntities(player.championName),
+    coreIds,
+    fullBuildIds,
+    situationalIds,
+    bootIds: unique([...coreIds, ...fullBuildIds]).filter((itemId) => staticData.items[itemId]?.features?.isBoots)
+  };
+
+  writeJson(getMetaBuildCacheFile(slug), payload);
+  return payload;
 }
 
 async function loadStaticData() {
@@ -574,8 +689,8 @@ function buildMetaSource(player) {
   return {
     provider: "Mobalytics",
     label: `${player.championName} build page`,
-    url: `https://mobalytics.gg/lol/champions/${slug}`,
-    note: "External meta reference page for the standard build baseline."
+    url: `https://mobalytics.gg/lol/champions/${slug}/build`,
+    note: "Candidate pool is constrained to this provider's build lists."
   };
 }
 
@@ -820,6 +935,56 @@ function ownsBoots(self, itemMap) {
   return self.items.some((itemId) => itemMap[itemId]?.features?.isBoots);
 }
 
+function findOwnedBoot(self, itemMap) {
+  for (const itemId of self.items) {
+    const item = itemMap[itemId];
+    if (item?.features?.isBoots) {
+      return item;
+    }
+  }
+  return null;
+}
+
+function isNonBuildSlotItem(item) {
+  if (!item) {
+    return true;
+  }
+
+  const lower = item.features?.lowerText || "";
+  return (
+    item.tags.includes("Trinket") ||
+    item.tags.includes("Consumable") ||
+    lower.includes("trinket") ||
+    lower.includes("ward") ||
+    lower.includes("elixir")
+  );
+}
+
+function getBuildSlotItemIds(itemIds, itemMap) {
+  return itemIds.filter((itemId) => !isNonBuildSlotItem(itemMap[itemId]));
+}
+
+function isCompletedInventoryItem(item) {
+  if (!item) {
+    return false;
+  }
+  if (isNonBuildSlotItem(item)) {
+    return false;
+  }
+  if (item.features.isBoots) {
+    return true;
+  }
+  return Number(item.gold.total || 0) >= 2200 || Number(item.depth || 0) >= 2;
+}
+
+function hasFullCompletedBuild(self, itemMap) {
+  const buildSlotItemIds = getBuildSlotItemIds(self.items, itemMap);
+  if (buildSlotItemIds.length < 6) {
+    return false;
+  }
+  return buildSlotItemIds.every((itemId) => isCompletedInventoryItem(itemMap[itemId]));
+}
+
 function isExcludedItem(item, selfArchetype) {
   const lower = item.features.lowerText;
   if (!item.maps["11"] || !item.gold.purchasable) {
@@ -1053,6 +1218,7 @@ function scoreItem(item, context) {
   return {
     itemId: item.id,
     name: item.name,
+    isBoots: item.features.isBoots,
     totalScore,
     missingGold,
     totalGold: Number(item.gold.total || 0),
@@ -1135,7 +1301,52 @@ function buildReasons(item, context, breakdown) {
   return reasons.slice(0, 3);
 }
 
-function analyzeGame(rawGame, staticData) {
+function buildReplacementRecommendation(self, scoredItems, itemMap, staticData, context) {
+  const ownedCompleted = self.items
+    .map((itemId) => itemMap[itemId])
+    .filter((item) => item && isCompletedInventoryItem(item))
+    .map((item) => ({
+      itemId: item.id,
+      name: item.name,
+      stats: item.stats,
+      imageUrl: `https://ddragon.leagueoflegends.com/cdn/${staticData.version}/img/item/${item.image.full}`,
+      totalGold: Number(item.gold.total || 0),
+      totalScore: scoreItem(item, context).totalScore,
+      isBoots: item.features.isBoots
+    }))
+    .sort((left, right) => left.totalScore - right.totalScore);
+
+  const replaceable = ownedCompleted.filter((item) => !item.isBoots);
+  const currentItem = replaceable[0] || ownedCompleted[0] || null;
+  if (!currentItem) {
+    return null;
+  }
+
+  const candidate = scoredItems.find((item) => item.itemId !== currentItem.itemId && !self.items.includes(item.itemId)) || null;
+  if (!candidate) {
+    return null;
+  }
+
+  const scoreGain = candidate.totalScore - currentItem.totalScore;
+  return {
+    active: true,
+    sell: {
+      itemId: currentItem.itemId,
+      name: currentItem.name,
+      imageUrl: currentItem.imageUrl,
+      totalScore: currentItem.totalScore
+    },
+    buy: candidate,
+    scoreGain,
+    reasons: [
+      `Your six slots are already filled, so this is a swap call rather than a next-slot buy.`,
+      `${candidate.name} currently scores ${scoreGain >= 0 ? "+" : ""}${scoreGain.toFixed(1)} better than ${currentItem.name} in this game state.`,
+      ...candidate.reasons.slice(0, 2)
+    ].slice(0, 3)
+  };
+}
+
+async function analyzeGame(rawGame, staticData) {
   const players = (rawGame.allPlayers || []).map((player) => normalizePlayer(player, staticData.champions));
   const selfName = rawGame.activePlayer?.summonerName || players[0]?.name;
   const self = players.find((player) => player.name === selfName) || players[0];
@@ -1151,11 +1362,40 @@ function analyzeGame(rawGame, staticData) {
   const needs = classifyNeeds(self, rawGame.activePlayer || {}, enemyField, gameMinutes, liveSignal);
   const ownedIds = new Set(self.items);
   const hasBoots = ownsBoots(self, staticData.items);
+  const ownedBoot = findOwnedBoot(self, staticData.items);
+  const fullBuild = hasFullCompletedBuild(self, staticData.items);
+  const buildSlotItemIds = getBuildSlotItemIds(self.items, staticData.items);
   const prefersMagic =
     self.archetype === "mage" || self.archetype === "ap-assassin" || self.archetype === "enchanter";
+  let externalBuild = null;
+  let providerError = null;
 
-  const recommendations = Object.values(staticData.items)
-    .filter((item) => !isExcludedItem(item, self.archetype))
+  try {
+    externalBuild = await loadMobalyticsBuild(self, staticData);
+  } catch (error) {
+    providerError = error.message;
+  }
+
+  const baselinePoolIds = unique([...(externalBuild?.coreIds || []), ...(externalBuild?.fullBuildIds || [])]).filter(
+    (itemId) => staticData.items[itemId] && !staticData.items[itemId].features.isBoots
+  );
+  const situationalPoolIds = unique(externalBuild?.situationalIds || []).filter(
+    (itemId) => staticData.items[itemId] && !staticData.items[itemId].features.isBoots
+  );
+  const preferredPoolIds =
+    liveSignal >= 0.35
+      ? situationalPoolIds.length
+        ? situationalPoolIds
+        : baselinePoolIds
+      : baselinePoolIds.length
+        ? baselinePoolIds
+        : situationalPoolIds;
+  const fallbackPoolIds = unique(Object.keys(staticData.items).filter((itemId) => !staticData.items[itemId].features.isBoots));
+  const candidatePoolIds = preferredPoolIds.length ? preferredPoolIds : fallbackPoolIds;
+
+  const scoredItems = candidatePoolIds
+    .map((itemId) => staticData.items[itemId])
+    .filter((item) => item && !isExcludedItem(item, self.archetype))
     .map((item) =>
       scoreItem(item, {
         self,
@@ -1170,9 +1410,49 @@ function analyzeGame(rawGame, staticData) {
         version: staticData.version
       })
     )
+    .sort((left, right) => right.totalScore - left.totalScore);
+
+  const bootPoolIds = unique(externalBuild?.bootIds || []).filter((itemId) => staticData.items[itemId]);
+  const scoredBoots = !hasBoots
+    ? bootPoolIds
+        .map((itemId) => staticData.items[itemId])
+        .filter((item) => item && !isExcludedItem(item, self.archetype))
+        .map((item) =>
+          scoreItem(item, {
+            self,
+            ownedIds,
+            enemyField,
+            needs,
+            gameMinutes,
+            phase,
+            liveSignal,
+            hasBoots,
+            prefersMagic,
+            version: staticData.version
+          })
+        )
+        .sort((left, right) => right.totalScore - left.totalScore)
+    : [];
+  const bestBoot = !hasBoots ? scoredBoots[0] || null : null;
+  const recommendations = scoredItems
+    .filter((result) => !result.isBoots)
     .filter((result) => result.totalScore > 7)
-    .sort((left, right) => right.totalScore - left.totalScore)
     .slice(0, 6);
+  const replacement =
+    fullBuild
+      ? buildReplacementRecommendation(self, scoredItems.filter((result) => !result.isBoots), staticData.items, staticData, {
+          self,
+          ownedIds,
+          enemyField,
+          needs,
+          gameMinutes,
+          phase,
+          liveSignal,
+          hasBoots,
+          prefersMagic,
+          version: staticData.version
+        })
+      : null;
 
   const topThreatShare = enemyField.topThreat
     ? enemyField.topThreat.threatScore / enemyField.totalThreat
@@ -1194,10 +1474,11 @@ function analyzeGame(rawGame, staticData) {
       archetype: self.archetype,
       gold: needs.gold,
       level: self.level,
+      fullBuild,
       armor: needs.armor,
       mr: needs.mr,
       health: needs.health,
-      items: self.items.map((itemId) => {
+      items: buildSlotItemIds.map((itemId) => {
         const item = staticData.items[itemId];
         return item
           ? {
@@ -1233,9 +1514,33 @@ function analyzeGame(rawGame, staticData) {
       defenseNeed: needs.defenseNeed
     },
     meta: {
-      modelSummary: "Class-based prior + live enemy threat + live damage mix + your current stats.",
-      source: buildMetaSource(self)
+      modelSummary:
+        liveSignal >= 0.35
+          ? "Mobalytics situational-item pool + live enemy threat + live damage mix + your current stats."
+          : "Mobalytics core/full build pool + your current level, gold, and build state.",
+      source: buildMetaSource(self),
+      pool: liveSignal >= 0.35 ? "situational" : "baseline",
+      providerStatus: externalBuild ? "ok" : "fallback",
+      providerError
     },
+    boots: hasBoots
+      ? {
+          state: "owned",
+          current: {
+            id: ownedBoot.id,
+            name: ownedBoot.name,
+            imageUrl: `https://ddragon.leagueoflegends.com/cdn/${staticData.version}/img/item/${ownedBoot.image.full}`
+          }
+        }
+      : bestBoot
+        ? {
+            state: "recommended",
+            recommendation: bestBoot
+          }
+        : {
+            state: "none"
+          },
+    replacement,
     recommendations
   };
 }
@@ -1293,7 +1598,7 @@ async function handleApiState(req, res) {
       }
     }
 
-    const analysis = analyzeGame(rawGame, staticData);
+    const analysis = await analyzeGame(rawGame, staticData);
     sendJson(res, 200, {
       ok: true,
       source,

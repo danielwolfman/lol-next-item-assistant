@@ -210,6 +210,47 @@ a:hover {
   margin-top: 16px;
 }
 
+.boots-card {
+  margin-bottom: 20px;
+}
+
+.replacement-card {
+  margin-bottom: 20px;
+}
+
+.boots-header {
+  margin-bottom: 16px;
+}
+
+.boot-card {
+  display: grid;
+  gap: 12px;
+}
+
+.replacement-body-grid {
+  display: grid;
+  gap: 14px;
+}
+
+.swap-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 16px;
+  align-items: center;
+}
+
+.swap-item {
+  padding: 14px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.swap-arrow {
+  font-size: 1.8rem;
+  color: var(--accent);
+  text-align: center;
+}
+
 .recommendation-card {
   display: flex;
   flex-direction: column;
@@ -277,6 +318,10 @@ a:hover {
 @media (max-width: 980px) {
   .summary-grid,
   .recommendation-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .swap-columns {
     grid-template-columns: 1fr;
   }
 

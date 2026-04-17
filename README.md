@@ -4,12 +4,12 @@
 
 This is an Electron desktop assistant for League of Legends. It reads Riot's local Live Client API on `https://127.0.0.1:2999/liveclientdata/allgamedata`, then ranks item options from:
 
-- a class-based meta prior for your champion archetype
+- a Mobalytics build-page candidate pool for the active champion
 - current enemy damage split by threat
 - the most fed enemy right now
 - your current item state and how close you are to finishing an item
 
-The UI also links an external meta reference page for the active champion:
+The UI links the external build page it is using for candidate sourcing:
 
 - Mobalytics champion build page
 
@@ -47,9 +47,14 @@ node server.js
 
 ## Current scoring model
 
-`score = meta-fit + live-counter-fit + fed-threat bonus + build-path bonus + affordability`
+`score = provider-pool fit + live-counter-fit + fed-threat bonus + build-path bonus + affordability`
 
-This v1 is intentionally heuristic. The internal "meta" scorer is still a class-based prior derived from Riot champion tags and item stats. The app now shows a Mobalytics reference link for the active champion so you can compare the live recommendation against a well-known public build source.
+The candidate pool is now provider-constrained:
+
+- low-signal early game: Mobalytics core/full build items
+- live reactive states: Mobalytics situational items
+
+The scoring inside that pool is still heuristic and uses live threat, damage mix, gold, and owned components to rank the next best option.
 
 ## Packaging
 
