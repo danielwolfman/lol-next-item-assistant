@@ -1,6 +1,6 @@
 {
   "name": "lol-item-coach",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "Electron desktop app that recommends the next League of Legends item during a live game.",
   "author": "Codex",
   "main": "main.js",

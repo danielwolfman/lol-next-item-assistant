@@ -56,6 +56,50 @@ const DAMAGE_ARCHETYPE_HINTS = {
   enchanter: { physical: 0.15, magic: 0.85 }
 };
 
+const BUILTIN_SUSTAIN_HINTS = {
+  aatrox: { score: 1.15, label: "heavy self-healing" },
+  ahri: { score: 0.3, label: "passive healing" },
+  alistar: { score: 0.35, label: "passive sustain" },
+  briar: { score: 1.1, label: "combat sustain" },
+  chogath: { score: 0.35, label: "lane sustain" },
+  darius: { score: 0.42, label: "Q sustain" },
+  drmundo: { score: 1.15, label: "regeneration" },
+  fiddlesticks: { score: 0.95, label: "drain healing" },
+  fiora: { score: 0.6, label: "vitals healing" },
+  hecarim: { score: 0.32, label: "combat healing" },
+  irelia: { score: 0.3, label: "Q sustain" },
+  maokai: { score: 0.32, label: "passive sustain" },
+  nami: { score: 0.45, label: "ally healing" },
+  nasus: { score: 0.55, label: "lifesteal passive" },
+  nilah: { score: 0.82, label: "lifesteal scaling" },
+  nunu: { score: 0.52, label: "Consume sustain" },
+  olaf: { score: 0.42, label: "lifesteal passive" },
+  renekton: { score: 0.58, label: "Q sustain" },
+  rengar: { score: 0.38, label: "empowered heal" },
+  senna: { score: 0.42, label: "Q sustain" },
+  seraphine: { score: 0.28, label: "team healing" },
+  sona: { score: 0.42, label: "team healing" },
+  soraka: { score: 1.2, label: "dedicated healer" },
+  swain: { score: 0.82, label: "ultimate drain" },
+  sylas: { score: 0.8, label: "W heal" },
+  taric: { score: 0.42, label: "ally healing" },
+  trundle: { score: 0.62, label: "lifesteal sustain" },
+  udyr: { score: 0.4, label: "stance sustain" },
+  vladimir: { score: 1.05, label: "spell vamp pattern" },
+  volibear: { score: 0.62, label: "W healing" },
+  warwick: { score: 1.15, label: "heavy sustain" },
+  xinzhao: { score: 0.38, label: "passive heal" },
+  yuumi: { score: 0.92, label: "healing support" },
+  zac: { score: 0.65, label: "blob healing" }
+};
+
+const ANTI_HEAL_ITEM_NAMES = {
+  tank: ["bramble vest", "thornmail"],
+  ap: ["oblivion orb", "morellonomicon"],
+  marksman: ["executioner's calling", "mortal reminder"],
+  fighter: ["executioner's calling", "chempunk chainsword"]
+};
+
 const ARCHETYPE_WEIGHTS = {
   marksman: {
     ad: 1.1,
@@ -256,6 +300,130 @@ function championSlug(value) {
 
 function unique(values) {
   return [...new Set(values)];
+}
+
+function findItemsByLowerNames(itemMap, names) {
+  const wanted = new Set(names.map((name) => name.toLowerCase()));
+  return unique(
+    Object.values(itemMap)
+      .filter((item) => wanted.has(item.name.toLowerCase()))
+      .map((item) => item.id)
+  );
+}
+
+function getPreferredAntiHealNames(archetype, supportProfile) {
+  if (supportProfile || archetype === "tank") {
+    return ANTI_HEAL_ITEM_NAMES.tank;
+  }
+  if (archetype === "mage" || archetype === "ap-assassin" || archetype === "enchanter") {
+    return ANTI_HEAL_ITEM_NAMES.ap;
+  }
+  if (archetype === "marksman" || archetype === "ad-assassin") {
+    return ANTI_HEAL_ITEM_NAMES.marksman;
+  }
+  return ANTI_HEAL_ITEM_NAMES.fighter;
+}
+
+function getAntiHealOverridePoolIds(itemMap, archetype, supportProfile) {
+  return findItemsByLowerNames(itemMap, getPreferredAntiHealNames(archetype, supportProfile));
+}
+
+function getBuiltinSustainProfile(player) {
+  const championToken = normalizeToken(player.champion?.id || player.championName);
+  const hint = BUILTIN_SUSTAIN_HINTS[championToken];
+  if (!hint) {
+    return null;
+  }
+  const levelScale = clamp(0.72 + player.level / 18, 0.72, 1.35);
+  const archetypeScale = player.archetype === "enchanter" ? 0.9 : 1;
+  return {
+    score: hint.score * levelScale * archetypeScale,
+    source: `${player.championName} has ${hint.label}.`
+  };
+}
+
+function getItemSustainProfile(player, itemMap) {
+  let score = 0;
+  const sources = [];
+
+  for (const itemId of player.items) {
+    const item = itemMap[itemId];
+    if (!item) {
+      continue;
+    }
+
+    const lower = item.features.lowerText;
+    let itemScore = 0;
+
+    if (item.stats.lifesteal > 0) {
+      itemScore += 0.35 + item.stats.lifesteal / 18;
+    }
+    if (
+      lower.includes("lifesteal") ||
+      lower.includes("life steal") ||
+      lower.includes("omnivamp") ||
+      lower.includes("physical vamp")
+    ) {
+      itemScore += 0.5;
+    }
+    if (item.features.hasHealShieldPower) {
+      itemScore += player.archetype === "enchanter" ? 0.3 : 0.12;
+    }
+    if (
+      !item.features.hasHealShieldPower &&
+      (lower.includes("restore health") ||
+        lower.includes("restores health") ||
+        lower.includes("heal") ||
+        lower.includes("heals") ||
+        lower.includes("healing"))
+    ) {
+      itemScore += 0.28;
+    }
+
+    if (itemScore > 0) {
+      score += itemScore;
+      if (itemScore >= 0.45) {
+        sources.push(item.name);
+      }
+    }
+  }
+
+  return {
+    score,
+    sources: unique(sources)
+  };
+}
+
+function formatChampionList(champions) {
+  if (!champions.length) {
+    return "";
+  }
+  if (champions.length === 1) {
+    return champions[0];
+  }
+  if (champions.length === 2) {
+    return `${champions[0]} and ${champions[1]}`;
+  }
+  return `${champions.slice(0, -1).join(", ")}, and ${champions[champions.length - 1]}`;
+}
+
+function computeAntiHealFit(item, context) {
+  if (!item.features.hasGrievousWounds) {
+    return 0;
+  }
+
+  const lowerName = item.name.toLowerCase();
+  const preferredNames = new Set(getPreferredAntiHealNames(context.self.archetype, context.isSupportProfile));
+  let fit = preferredNames.has(lowerName) ? 2.8 : -1.8;
+
+  if (context.phase === "lane" && item.gold.total <= 1900) {
+    fit += 1.4;
+  }
+  if (countOwnedComponents(item, context.ownedIds) > 0) {
+    fit += 1.2;
+  }
+
+  return fit;
 }
 
 function decodeHtmlEntities(text) {
@@ -1117,31 +1285,40 @@ function summariseEnemyField(enemies, itemMap) {
     const damage = computeDamageProfile(player, itemMap);
     const threatScore = computeThreatScore(player, itemMap);
     const damageInfluence = computeDamageInfluence(player, itemMap);
-    const healingSignals = player.items.reduce((sum, itemId) => {
-      const item = itemMap[itemId];
-      if (!item) {
-        return sum;
-      }
-      const text = item.features.lowerText;
-      const lifestealScore = item.stats.lifesteal > 0 ? 0.4 : 0;
-      const sustainText = text.includes("heal") || text.includes("omnivamp") || text.includes("lifesteal") ? 0.45 : 0;
-      return sum + lifestealScore + sustainText;
-    }, 0);
+    const builtinSustain = getBuiltinSustainProfile(player);
+    const itemSustain = getItemSustainProfile(player, itemMap);
+    const healingSignals = (builtinSustain?.score || 0) + itemSustain.score;
 
     return {
       ...player,
       threatScore,
       damage,
       damageInfluence,
-      healingSignals
+      healingSignals,
+      healingSources: unique([builtinSustain?.source, ...itemSustain.sources].filter(Boolean))
     };
   });
 
   const totalThreat = assessed.reduce((sum, player) => sum + player.threatScore, 0) || 1;
   const totalPressure = assessed.reduce((sum, player) => sum + player.threatScore * player.damageInfluence, 0) || 1;
-  const healingPressure =
-    assessed.reduce((sum, player) => sum + player.healingSignals * (player.threatScore / totalThreat), 0);
+  const healingPressure = assessed.reduce((sum, player) => {
+    const threatShare = player.threatScore / totalThreat;
+    const pressureShare = (player.threatScore * player.damageInfluence) / totalPressure;
+    return sum + player.healingSignals * (threatShare * 0.65 + pressureShare * 0.35);
+  }, 0);
   const ranked = assessed.slice().sort((left, right) => right.threatScore - left.threatScore);
+  const healingThreats = assessed
+    .filter((player) => player.healingSignals >= 0.4)
+    .sort((left, right) => right.healingSignals * right.threatScore - left.healingSignals * left.threatScore)
+    .slice(0, 3)
+    .map((player) => ({
+      championName: player.championName,
+      score: player.healingSignals,
+      kills: player.kills,
+      deaths: player.deaths,
+      assists: player.assists,
+      sources: player.healingSources
+    }));
   const topThreat = ranked[0];
   const runnerUpThreat = ranked[1] || null;
   const topThreatShare = topThreat ? topThreat.threatScore / totalThreat : 0;
@@ -1165,6 +1342,12 @@ function summariseEnemyField(enemies, itemMap) {
     physicalShare,
     magicShare,
     healingPressure,
+    antiHealPriority: clamp(
+      healingPressure * 0.88 + (healingThreats[0]?.score || 0) * 0.18 + healingThreats.length * 0.06,
+      0,
+      1.45
+    ),
+    healingThreats,
     topThreat,
     topThreatShare,
     topThreatLead
@@ -1302,16 +1485,17 @@ function hasFullCompletedBuild(self, itemMap) {
 
 function isExcludedItem(item, selfArchetype) {
   const lower = item.features.lowerText;
+  const allowAsAntiHeal = item.features.hasGrievousWounds;
   if (!item.maps["11"] || !item.gold.purchasable) {
     return true;
   }
-  if (item.gold.total < 900) {
+  if (item.gold.total < 900 && !allowAsAntiHeal) {
     return true;
   }
-  if (!item.features.isBoots && item.gold.total < 2200) {
+  if (!item.features.isBoots && item.gold.total < 2200 && !allowAsAntiHeal) {
     return true;
   }
-  if (item.depth < 2 && !item.features.isBoots) {
+  if (item.depth < 2 && !item.features.isBoots && !allowAsAntiHeal) {
     return true;
   }
   if (
@@ -1434,6 +1618,8 @@ function scoreItem(item, context) {
   const liveWeight = context.liveSignal;
   const isSupportProfile = context.isSupportProfile;
   const lowerName = item.name.toLowerCase();
+  const antiHealFit = computeAntiHealFit(item, context);
+  const antiHealWeight = Math.max(liveWeight, enemyField.antiHealPriority >= 0.55 ? 0.28 : 0);
 
   let base = 0;
   base += (stats.ad / 40) * weights.ad * 10;
@@ -1471,13 +1657,13 @@ function scoreItem(item, context) {
 
   const adCounterValue = (stats.armor / 35) * 7.2 + (stats.health / 350) * 3.6 + (feature.hasStasis ? 5.5 : 0);
   const apCounterValue = (stats.mr / 35) * 7.2 + (stats.health / 350) * 3.5 + (feature.hasShield ? 1.2 : 0);
-  const antiHealValue = feature.hasGrievousWounds ? 5.2 : 0;
+  const antiHealValue = feature.hasGrievousWounds ? 5.2 + antiHealFit : 0;
 
   const counterScore =
     (adCounterValue * enemyField.physicalShare * needs.armorNeed * needs.defenseNeed +
-      apCounterValue * enemyField.magicShare * needs.mrNeed * needs.defenseNeed +
-      antiHealValue * clamp(enemyField.healingPressure, 0, 1.2)) *
-    liveWeight;
+      apCounterValue * enemyField.magicShare * needs.mrNeed * needs.defenseNeed) *
+      liveWeight +
+    antiHealValue * clamp(enemyField.antiHealPriority, 0, 1.45) * antiHealWeight;
 
   let topThreatBonus = 0;
   const topThreatShare = enemyField.topThreatShare || (topThreat ? topThreat.threatScore / Math.max(1, enemyField.totalThreat) : 0);
@@ -1489,6 +1675,14 @@ function scoreItem(item, context) {
     } else {
       topThreatBonus += apCounterValue * topThreatShare * (0.95 + topThreatLead * 1.3) * liveWeight;
     }
+  }
+  if (feature.hasGrievousWounds && enemyField.healingThreats.length) {
+    const topHealingThreat = enemyField.healingThreats[0];
+    topThreatBonus +=
+      antiHealValue *
+      clamp(topHealingThreat.score / 1.1, 0.2, 1.4) *
+      (0.3 + topThreatShare * 0.4 + topThreatLead * 0.4) *
+      Math.max(liveWeight, 0.24);
   }
 
   let progressionBonus = 0;
@@ -1617,7 +1811,9 @@ function buildReasons(item, context, breakdown) {
         `Enemy comp is ${Math.round(context.enemyField.magicShare * 100)}% AP by threat, so MR is worth stacking.`
       );
     } else if (item.features.hasGrievousWounds) {
-      reasons.push("Enemy sustain is climbing, so anti-heal has real value.");
+      const healingTargets = context.enemyField.healingThreats.slice(0, 2).map((entry) => entry.championName);
+      const targetText = healingTargets.length ? `${formatChampionList(healingTargets)} can sustain through fights` : "Enemy sustain is climbing";
+      reasons.push(`${targetText}, so anti-heal has real value.`);
     }
   }
 
@@ -1643,6 +1839,16 @@ function buildReasons(item, context, breakdown) {
       reasons.push("Boot slot is open and Mercs smooth out the AP pressure.");
     } else {
       reasons.push("Boot slot is still open, so this is a low-friction tempo spike.");
+    }
+  }
+
+  if (item.features.hasGrievousWounds && context.enemyField.antiHealPriority >= 0.52 && reasons.length < 3) {
+    const itemSources = context.enemyField.healingThreats
+      .flatMap((entry) => entry.sources || [])
+      .filter((source) => !source.endsWith("healing.") && !source.endsWith("sustain."))
+      .slice(0, 2);
+    if (itemSources.length) {
+      reasons.push(`Enemy sustain items like ${itemSources.join(" and ")} make Grievous Wounds worth buying.`);
     }
   }
 
@@ -1787,12 +1993,16 @@ async function buildPerspectiveForPlayer(player, staticData, shared, options = {
       ? unique([...baselinePoolIds, ...situationalPoolIds])
       : null;
   const carryoverPoolIds = baselinePoolIds.filter((itemId) => countOwnedComponents(staticData.items[itemId], ownedIds) > 0);
+  const antiHealOverrideIds =
+    shared.enemyField.antiHealPriority >= 0.52
+      ? getAntiHealOverridePoolIds(staticData.items, player.archetype, supportProfile)
+      : [];
   const preferredPoolIds = supportMergedPoolIds?.length
     ? supportMergedPoolIds
     : shared.liveSignal >= 0.35
-      ? unique([...(situationalPoolIds.length ? situationalPoolIds : baselinePoolIds), ...carryoverPoolIds])
+      ? unique([...(situationalPoolIds.length ? situationalPoolIds : baselinePoolIds), ...carryoverPoolIds, ...antiHealOverrideIds])
       : baselinePoolIds.length
-        ? baselinePoolIds
+        ? unique([...baselinePoolIds, ...antiHealOverrideIds])
         : situationalPoolIds;
   const fallbackPoolIds = unique(Object.keys(staticData.items).filter((itemId) => !staticData.items[itemId].features.isBoots));
   const candidatePoolIds = preferredPoolIds.length ? preferredPoolIds : fallbackPoolIds;
@@ -1846,9 +2056,9 @@ async function buildPerspectiveForPlayer(player, staticData, shared, options = {
     meta: {
       modelSummary: shared.liveSignal >= 0.35
         ? supportMergedPoolIds?.length
-          ? "Mobalytics support core + situational pool + live enemy threat + live damage mix + current board state."
-          : "Mobalytics situational-item pool + live enemy threat + live damage mix + current board state."
-        : "Mobalytics core/full build pool + current level and build state.",
+          ? `Mobalytics support core + situational pool + live enemy threat + live damage mix + current board state${antiHealOverrideIds.length ? " + targeted anti-heal overrides." : "."}`
+          : `Mobalytics situational-item pool + live enemy threat + live damage mix + current board state${antiHealOverrideIds.length ? " + targeted anti-heal overrides." : "."}`
+        : `Mobalytics core/full build pool + current level and build state${antiHealOverrideIds.length ? " + targeted anti-heal overrides." : "."}`,
       source: buildMetaSource(player),
       pool: supportMergedPoolIds?.length ? "support-blend" : shared.liveSignal >= 0.35 ? "situational" : "baseline",
       providerStatus: externalBuild ? "ok" : "fallback",
