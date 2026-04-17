@@ -532,6 +532,7 @@ function buildItemRecord(itemId, item) {
     tags,
     depth: item.depth || 0,
     from: item.from || [],
+    into: item.into || [],
     description,
     image: item.image || {},
     stats: {
@@ -1169,7 +1170,7 @@ function isCompletedInventoryItem(item) {
   if (item.features.isBoots) {
     return true;
   }
-  return Number(item.gold.total || 0) >= 2200 || Number(item.depth || 0) >= 2;
+  return !Array.isArray(item.into) || item.into.length === 0;
 }
 
 function hasFullCompletedBuild(self, itemMap) {
