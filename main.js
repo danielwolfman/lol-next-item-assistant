@@ -5,6 +5,7 @@ const { startServer } = require("./server");
 let mainWindow = null;
 let localServer = null;
 const APP_PORT = 3210;
+const WINDOW_ICON = path.join(__dirname, "build", "icon.png");
 
 function registerStartup() {
   if (process.platform !== "win32") {
@@ -25,6 +26,7 @@ function createWindow() {
     minWidth: 1040,
     minHeight: 760,
     backgroundColor: "#07131c",
+    icon: WINDOW_ICON,
     autoHideMenuBar: true,
     title: "LoL Next Item Assistant",
     webPreferences: {

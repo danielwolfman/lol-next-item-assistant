@@ -1,6 +1,6 @@
 {
   "name": "lol-next-item-assistant",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Electron desktop assistant that recommends the next League of Legends item during a live game.",
   "author": "Codex",
   "main": "main.js",
