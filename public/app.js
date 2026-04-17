@@ -11,6 +11,8 @@ const bootsBody = document.getElementById("boots-body");
 const replacementCard = document.getElementById("replacement-card");
 const replacementState = document.getElementById("replacement-state");
 const replacementBody = document.getElementById("replacement-body");
+const premadeSection = document.getElementById("premade-section");
+const premadeGrid = document.getElementById("premade-grid");
 const playerHeading = document.getElementById("player-heading");
 const playerStats = document.getElementById("player-stats");
 const playerItems = document.getElementById("player-items");
@@ -62,6 +64,7 @@ function renderItems(items) {
 function buildRecommendationCard(rec, index) {
   const card = document.createElement("article");
   card.className = "panel recommendation-card";
+  const missingGoldLine = rec.goldKnown === false ? "Unknown from live feed" : formatGold(rec.missingGold);
 
   const tone = index === 0 ? "best" : index === 1 ? "good" : "situational";
   card.innerHTML = `
@@ -76,7 +79,7 @@ function buildRecommendationCard(rec, index) {
     <div class="card-body">
       <div class="card-metric-row">
         <span>Missing gold</span>
-        <strong>${formatGold(rec.missingGold)}</strong>
+        <strong>${missingGoldLine}</strong>
       </div>
       <div class="card-metric-row">
         <span>Key stats</span>
@@ -149,6 +152,7 @@ function buildBootCard(boots) {
 function buildReplacementCard(replacement) {
   const card = document.createElement("div");
   card.className = "replacement-body-grid";
+  const missingGoldLine = replacement.buy.goldKnown === false ? "Unknown from live feed" : formatGold(replacement.buy.missingGold);
   card.innerHTML = `
     <div class="swap-columns">
       <div class="swap-item">
@@ -180,7 +184,7 @@ function buildReplacementCard(replacement) {
       </div>
       <div class="card-metric-row">
         <span>Missing gold</span>
-        <strong>${formatGold(replacement.buy.missingGold)}</strong>
+        <strong>${missingGoldLine}</strong>
       </div>
       <div class="reason-list">
         ${replacement.reasons.map((reason) => `<p>${reason}</p>`).join("")}
@@ -243,6 +247,92 @@ function renderReplacement(payload) {
   replacementBody.appendChild(empty);
 }
 
+function buildPremadeCard(member) {
+  const details = document.createElement("details");
+  details.className = "panel premade-card";
+
+  const itemStrip = member.player.items
+    .map((item) => `<img src="${item.imageUrl}" alt="${item.name}" title="${item.name}" />`)
+    .join("");
+  const metaPool = member.meta.pool === "situational" ? "situational items" : "core/full build";
+  const bootsMarkup =
+    member.boots.state === "recommended" && member.boots.recommendation
+      ? `<div class="premade-inline-card">
+          <p class="panel-label">Boots</p>
+          <div class="item-header">
+            <img class="item-icon" src="${member.boots.recommendation.imageUrl}" alt="${member.boots.recommendation.name}" />
+            <div>
+              <h3>${member.boots.recommendation.name}</h3>
+              <p class="muted">Best boot right now</p>
+            </div>
+          </div>
+        </div>`
+      : member.boots.state === "owned" && member.boots.current
+        ? `<div class="premade-inline-card">
+            <p class="panel-label">Boots</p>
+            <div class="item-header">
+              <img class="item-icon" src="${member.boots.current.imageUrl}" alt="${member.boots.current.name}" />
+              <div>
+                <h3>${member.boots.current.name}</h3>
+                <p class="muted">Boot slot completed</p>
+              </div>
+            </div>
+          </div>`
+        : "";
+  const replacementMarkup =
+    member.player.fullBuild && member.replacement?.active
+      ? `<div class="premade-inline-card">
+          <p class="panel-label">Swap</p>
+          <p><strong>${member.replacement.sell.name}</strong> → <strong>${member.replacement.buy.name}</strong></p>
+          <p class="muted">Score shift ${member.replacement.scoreGain >= 0 ? "+" : ""}${member.replacement.scoreGain.toFixed(1)}</p>
+        </div>`
+      : "";
+
+  details.innerHTML = `
+    <summary class="premade-summary">
+      <div>
+        <p class="panel-label">Premade teammate</p>
+        <h3>${member.player.championName} • ${member.player.summonerName}</h3>
+        <p class="muted">${member.player.kills}/${member.player.deaths}/${member.player.assists} • ${member.player.cs} CS • Level ${member.player.level}</p>
+      </div>
+      <div class="premade-summary-side">
+        <p class="muted">${member.partyLabel}</p>
+        <span class="premade-chevron">+</span>
+      </div>
+    </summary>
+    <div class="premade-body">
+      <div class="item-strip">${itemStrip}</div>
+      <p class="muted">Model: ${member.meta.modelSummary} Pool: ${metaPool}.</p>
+      <p class="muted">Exact current gold is not exposed for teammates by Riot's live feed, so these calls prioritize fit over immediate buy timing.</p>
+      <div class="premade-inline-grid">
+        ${bootsMarkup}
+        ${replacementMarkup}
+      </div>
+      <div class="premade-recommendation-grid"></div>
+    </div>
+  `;
+
+  const grid = details.querySelector(".premade-recommendation-grid");
+  member.recommendations.forEach((rec, index) => {
+    grid.appendChild(buildRecommendationCard(rec, index));
+  });
+  return details;
+}
+
+function renderPremades(payload) {
+  premadeGrid.innerHTML = "";
+
+  if (!payload.premades || !payload.premades.detected || !payload.premades.members.length) {
+    premadeSection.classList.add("hidden");
+    return;
+  }
+
+  premadeSection.classList.remove("hidden");
+  payload.premades.members.forEach((member) => {
+    premadeGrid.appendChild(buildPremadeCard(member));
+  });
+}
+
 function renderState(payload) {
   setStatus(
     `Live feed connected on patch ${payload.patch}.`,
@@ -293,6 +383,7 @@ function renderState(payload) {
 
   renderBoots(payload.boots);
   renderReplacement(payload);
+  renderPremades(payload);
 
   recommendationGrid.innerHTML = "";
   payload.recommendations.forEach((rec, index) => {
@@ -310,6 +401,7 @@ async function loadState() {
       summaryGrid.classList.add("hidden");
       bootsCard.classList.add("hidden");
       replacementCard.classList.add("hidden");
+      premadeSection.classList.add("hidden");
       metaLine.textContent = "";
       metaSource.textContent = "";
       setStatus("Live feed unavailable.", payload.error || "Unknown error", false);
@@ -322,6 +414,7 @@ async function loadState() {
     summaryGrid.classList.add("hidden");
     bootsCard.classList.add("hidden");
     replacementCard.classList.add("hidden");
+    premadeSection.classList.add("hidden");
     metaLine.textContent = "";
     metaSource.textContent = "";
     setStatus("Request failed.", error.message, false);

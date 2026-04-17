@@ -12,6 +12,12 @@ const PATCH_FILE = path.join(CACHE_DIR, "patch-version.json");
 const ITEMS_FILE = path.join(CACHE_DIR, "item-data.json");
 const CHAMPIONS_FILE = path.join(CACHE_DIR, "champion-data.json");
 const META_BUILD_TTL_MS = 1000 * 60 * 60 * 6;
+const PARTY_CACHE_TTL_MS = 1000 * 15;
+const LCU_LOCKFILE_PATHS = [
+  "C:\\ProgramData\\Riot Games\\Metadata\\league_of_legends.live\\league_of_legends.live.lockfile",
+  "C:\\Riot Games\\League of Legends\\lockfile",
+  "D:\\Riot Games\\League of Legends\\lockfile"
+];
 
 const STATIC_FILES = {
   "/": "index.html",
@@ -20,7 +26,8 @@ const STATIC_FILES = {
 };
 
 const cache = {
-  staticData: null
+  staticData: null,
+  partySnapshot: null
 };
 
 const DAMAGE_ARCHETYPE_HINTS = {
@@ -262,7 +269,18 @@ function writeJson(filePath, value) {
   fs.writeFileSync(filePath, JSON.stringify(value, null, 2));
 }
 
-function httpGetJson(targetUrl, { insecure = false, timeoutMs = 4500 } = {}) {
+function readTextIfPresent(filePath) {
+  if (!fs.existsSync(filePath)) {
+    return null;
+  }
+  try {
+    return fs.readFileSync(filePath, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+function httpGetJson(targetUrl, { headers = undefined, insecure = false, timeoutMs = 4500 } = {}) {
   return new Promise((resolve, reject) => {
     const url = new URL(targetUrl);
     const client = url.protocol === "https:" ? https : http;
@@ -272,6 +290,7 @@ function httpGetJson(targetUrl, { insecure = false, timeoutMs = 4500 } = {}) {
         hostname: url.hostname,
         port: url.port || undefined,
         path: `${url.pathname}${url.search}`,
+        headers,
         rejectUnauthorized: !insecure,
         timeout: timeoutMs
       },
@@ -302,7 +321,7 @@ function httpGetJson(targetUrl, { insecure = false, timeoutMs = 4500 } = {}) {
   });
 }
 
-function httpGetText(targetUrl, { insecure = false, timeoutMs = 4500 } = {}) {
+function httpGetText(targetUrl, { headers = undefined, insecure = false, timeoutMs = 4500 } = {}) {
   return new Promise((resolve, reject) => {
     const url = new URL(targetUrl);
     const client = url.protocol === "https:" ? https : http;
@@ -315,7 +334,8 @@ function httpGetText(targetUrl, { insecure = false, timeoutMs = 4500 } = {}) {
         rejectUnauthorized: !insecure,
         timeout: timeoutMs,
         headers: {
-          "User-Agent": "LoL-Item-Coach/0.2"
+          "User-Agent": "LoL-Item-Coach/0.2",
+          ...(headers || {})
         }
       },
       (res) => {
@@ -694,6 +714,163 @@ function buildMetaSource(player) {
   };
 }
 
+function parseLockfileEntry(text) {
+  const [processName, pid, port, password, protocol] = String(text || "").trim().split(":");
+  if (!processName || !port || !password) {
+    return null;
+  }
+  return {
+    processName,
+    pid: Number(pid || 0),
+    port: Number(port || 0),
+    password,
+    protocol: protocol || "https"
+  };
+}
+
+function loadLeagueClientCredentials() {
+  for (const filePath of LCU_LOCKFILE_PATHS) {
+    const contents = readTextIfPresent(filePath);
+    const parsed = parseLockfileEntry(contents);
+    if (parsed?.port && parsed?.password) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+function buildLcuAuthHeaders(password) {
+  const pair = `riot:${password}`;
+  const token = Buffer.from(pair, "utf8").toString("base64");
+  return {
+    Authorization: `Basic ${token}`
+  };
+}
+
+async function lcuGetJson(endpoint) {
+  const credentials = loadLeagueClientCredentials();
+  if (!credentials) {
+    throw new Error("League Client lockfile was not available.");
+  }
+  return httpGetJson(`https://127.0.0.1:${credentials.port}${endpoint}`, {
+    headers: buildLcuAuthHeaders(credentials.password),
+    insecure: true,
+    timeoutMs: 2500
+  });
+}
+
+function buildPartyNameCandidates(member) {
+  return unique([
+    member.gameName,
+    member.displayName,
+    member.summonerName,
+    member.internalName,
+    member.tagLine && member.gameName ? `${member.gameName}#${member.tagLine}` : null
+  ])
+    .filter(Boolean)
+    .map((value) => String(value).trim())
+    .filter(Boolean);
+}
+
+function parsePartyPresence(rawPresence) {
+  if (!rawPresence) {
+    return null;
+  }
+  try {
+    return JSON.parse(rawPresence);
+  } catch {
+    return null;
+  }
+}
+
+async function loadPremadePartyMembers() {
+  const cached = cache.partySnapshot;
+  if (cached && Date.now() - cached.fetchedAt < PARTY_CACHE_TTL_MS) {
+    return cached.members;
+  }
+
+  let me = null;
+  let currentSummoner = null;
+  let lobbyMembers = [];
+
+  try {
+    [me, currentSummoner] = await Promise.all([
+      lcuGetJson("/lol-chat/v1/me").catch(() => null),
+      lcuGetJson("/lol-summoner/v1/current-summoner").catch(() => null)
+    ]);
+
+    const partyPresence = parsePartyPresence(me?.lol?.pty);
+    let memberPuuids = unique(partyPresence?.summonerPuuids || []);
+
+    if (!memberPuuids.length) {
+      lobbyMembers = await lcuGetJson("/lol-lobby/v2/lobby/members").catch(() => []);
+      memberPuuids = unique(lobbyMembers.map((member) => member.puuid).filter(Boolean));
+    }
+
+    const selfPuuid = currentSummoner?.puuid || me?.puuid;
+    const teammatePuuids = memberPuuids.filter((puuid) => puuid && puuid !== selfPuuid);
+
+    if (!teammatePuuids.length) {
+      cache.partySnapshot = { fetchedAt: Date.now(), members: [] };
+      return [];
+    }
+
+    const members = (
+      await Promise.all(
+        teammatePuuids.map(async (puuid) => {
+          const fallbackLobbyMember = lobbyMembers.find((member) => member.puuid === puuid) || {};
+          const summoner = await lcuGetJson(`/lol-summoner/v2/summoners/puuid/${puuid}`).catch(() => null);
+          const merged = {
+            ...fallbackLobbyMember,
+            ...(summoner || {})
+          };
+          const nameCandidates = buildPartyNameCandidates(merged);
+          return {
+            puuid,
+            summonerId: merged.summonerId || null,
+            gameName: merged.gameName || "",
+            tagLine: merged.tagLine || "",
+            displayName: merged.displayName || "",
+            label:
+              merged.gameName && merged.tagLine
+                ? `${merged.gameName}#${merged.tagLine}`
+                : merged.gameName || merged.displayName || "Premade teammate",
+            nameCandidates
+          };
+        })
+      )
+    ).filter((member) => member.nameCandidates.length);
+
+    cache.partySnapshot = { fetchedAt: Date.now(), members };
+    return members;
+  } catch {
+    cache.partySnapshot = { fetchedAt: Date.now(), members: [] };
+    return [];
+  }
+}
+
+function matchPremadesToPlayers(partyMembers, allies, selfName) {
+  const remaining = allies.filter((player) => player.name !== selfName).map((player) => ({
+    player,
+    token: normalizeToken(player.name)
+  }));
+
+  return partyMembers
+    .map((member) => {
+      const candidateTokens = member.nameCandidates.map(normalizeToken).filter(Boolean);
+      const matchIndex = remaining.findIndex((entry) => candidateTokens.includes(entry.token));
+      if (matchIndex < 0) {
+        return null;
+      }
+      const [match] = remaining.splice(matchIndex, 1);
+      return {
+        ...member,
+        player: match.player
+      };
+    })
+    .filter(Boolean);
+}
+
 function resolveChampion(rawName, champions) {
   const token = normalizeToken(
     String(rawName || "")
@@ -892,11 +1069,12 @@ function computeLiveSignal(players, enemies, enemyField, itemMap, gameMinutes) {
   );
 }
 
-function classifyNeeds(self, activePlayer, enemyField, gameMinutes, liveSignal) {
+function classifyNeeds(self, activePlayer, enemyField, gameMinutes, liveSignal, goldKnown = true) {
   const armor = getStat(activePlayer?.championStats || {}, ["armor"], self.championStats.armor);
   const mr = getStat(activePlayer?.championStats || {}, ["magicResist", "spellBlock", "mr"], self.championStats.mr);
   const health = getStat(activePlayer?.championStats || {}, ["maxHealth", "health"], self.championStats.health);
-  const gold = Number(activePlayer?.currentGold || 0);
+  const rawGold = Number(activePlayer?.currentGold ?? activePlayer?.gold ?? 0);
+  const gold = goldKnown ? rawGold : null;
   const deathsPressure = Math.max(0, self.deaths - self.kills + 1) * 0.18;
   const topThreatShare = enemyField.topThreat ? enemyField.topThreat.threatScore / enemyField.totalThreat : 0.2;
   const reactiveThreat = topThreatShare * liveSignal;
@@ -907,6 +1085,7 @@ function classifyNeeds(self, activePlayer, enemyField, gameMinutes, liveSignal) 
 
   return {
     gold,
+    goldKnown,
     armor,
     mr,
     health,
@@ -1158,8 +1337,8 @@ function scoreItem(item, context) {
   const ownedComponents = countOwnedComponents(item, ownedIds);
   progressionBonus += ownedComponents * 2.4;
 
-  const missingGold = Math.max(0, Number(item.gold.total || 0) - needs.gold);
-  const affordabilityBonus = clamp(5 - missingGold / 450, 0, 5);
+  const missingGold = needs.goldKnown ? Math.max(0, Number(item.gold.total || 0) - Number(needs.gold || 0)) : null;
+  const affordabilityBonus = needs.goldKnown ? clamp(5 - missingGold / 450, 0, 5) : 0;
 
   let bootsModifier = 0;
   if (item.features.isBoots) {
@@ -1221,6 +1400,7 @@ function scoreItem(item, context) {
     isBoots: item.features.isBoots,
     totalScore,
     missingGold,
+    goldKnown: needs.goldKnown,
     totalGold: Number(item.gold.total || 0),
     imageUrl: `https://ddragon.leagueoflegends.com/cdn/${context.version}/img/item/${item.image.full}`,
     reasons,
@@ -1280,7 +1460,7 @@ function buildReasons(item, context, breakdown) {
     reasons.push("You already own part of the build path, so this is a clean tempo continuation.");
   }
 
-  if (breakdown.affordabilityBonus >= 3.5) {
+  if (context.needs.goldKnown && breakdown.affordabilityBonus >= 3.5) {
     reasons.push(`You are only ${Math.max(0, Math.round(context.needs.gold ? Math.max(0, item.gold.total - context.needs.gold) : 0))}g away from the full item.`);
   }
 
@@ -1346,32 +1526,58 @@ function buildReplacementRecommendation(self, scoredItems, itemMap, staticData, 
   };
 }
 
-async function analyzeGame(rawGame, staticData) {
-  const players = (rawGame.allPlayers || []).map((player) => normalizePlayer(player, staticData.champions));
-  const selfName = rawGame.activePlayer?.summonerName || players[0]?.name;
-  const self = players.find((player) => player.name === selfName) || players[0];
-  if (!self) {
-    throw new Error("Could not identify the active player from Live Client Data.");
-  }
+function buildPlayerHeader(player, staticData, needs, fullBuild) {
+  const buildSlotItemIds = getBuildSlotItemIds(player.items, staticData.items);
+  return {
+    summonerName: player.name,
+    championName: player.championName,
+    archetype: player.archetype,
+    gold: needs.gold,
+    goldKnown: needs.goldKnown,
+    level: player.level,
+    fullBuild,
+    kills: player.kills,
+    deaths: player.deaths,
+    assists: player.assists,
+    cs: player.cs,
+    armor: needs.armor,
+    mr: needs.mr,
+    health: needs.health,
+    items: buildSlotItemIds
+      .map((itemId) => {
+        const item = staticData.items[itemId];
+        return item
+          ? {
+              id: itemId,
+              name: item.name,
+              imageUrl: `https://ddragon.leagueoflegends.com/cdn/${staticData.version}/img/item/${item.image.full}`
+            }
+          : null;
+      })
+      .filter(Boolean)
+  };
+}
 
-  const enemies = players.filter((player) => player.team !== self.team);
-  const enemyField = summariseEnemyField(enemies, staticData.items);
-  const gameMinutes = Math.max(1, Number(rawGame.gameData?.gameTime || 0) / 60);
-  const phase = deriveBuildPhase(self.level, gameMinutes);
-  const liveSignal = computeLiveSignal(players, enemies, enemyField, staticData.items, gameMinutes);
-  const needs = classifyNeeds(self, rawGame.activePlayer || {}, enemyField, gameMinutes, liveSignal);
-  const ownedIds = new Set(self.items);
-  const hasBoots = ownsBoots(self, staticData.items);
-  const ownedBoot = findOwnedBoot(self, staticData.items);
-  const fullBuild = hasFullCompletedBuild(self, staticData.items);
-  const buildSlotItemIds = getBuildSlotItemIds(self.items, staticData.items);
+async function buildPerspectiveForPlayer(player, staticData, shared, options = {}) {
+  const {
+    goldSource = null,
+    goldKnown = false,
+    recommendationLimit = 6,
+    teammateLabel = null
+  } = options;
+  const phase = deriveBuildPhase(player.level, shared.gameMinutes);
+  const needs = classifyNeeds(player, goldSource || {}, shared.enemyField, shared.gameMinutes, shared.liveSignal, goldKnown);
+  const ownedIds = new Set(player.items);
+  const hasBoots = ownsBoots(player, staticData.items);
+  const ownedBoot = findOwnedBoot(player, staticData.items);
+  const fullBuild = hasFullCompletedBuild(player, staticData.items);
   const prefersMagic =
-    self.archetype === "mage" || self.archetype === "ap-assassin" || self.archetype === "enchanter";
+    player.archetype === "mage" || player.archetype === "ap-assassin" || player.archetype === "enchanter";
   let externalBuild = null;
   let providerError = null;
 
   try {
-    externalBuild = await loadMobalyticsBuild(self, staticData);
+    externalBuild = await loadMobalyticsBuild(player, staticData);
   } catch (error) {
     providerError = error.message;
   }
@@ -1383,7 +1589,7 @@ async function analyzeGame(rawGame, staticData) {
     (itemId) => staticData.items[itemId] && !staticData.items[itemId].features.isBoots
   );
   const preferredPoolIds =
-    liveSignal >= 0.35
+    shared.liveSignal >= 0.35
       ? situationalPoolIds.length
         ? situationalPoolIds
         : baselinePoolIds
@@ -1393,119 +1599,44 @@ async function analyzeGame(rawGame, staticData) {
   const fallbackPoolIds = unique(Object.keys(staticData.items).filter((itemId) => !staticData.items[itemId].features.isBoots));
   const candidatePoolIds = preferredPoolIds.length ? preferredPoolIds : fallbackPoolIds;
 
+  const scoringContext = {
+    self: player,
+    ownedIds,
+    enemyField: shared.enemyField,
+    needs,
+    gameMinutes: shared.gameMinutes,
+    phase,
+    liveSignal: shared.liveSignal,
+    hasBoots,
+    prefersMagic,
+    version: staticData.version
+  };
+
   const scoredItems = candidatePoolIds
     .map((itemId) => staticData.items[itemId])
-    .filter((item) => item && !isExcludedItem(item, self.archetype))
-    .map((item) =>
-      scoreItem(item, {
-        self,
-        ownedIds,
-        enemyField,
-        needs,
-        gameMinutes,
-        phase,
-        liveSignal,
-        hasBoots,
-        prefersMagic,
-        version: staticData.version
-      })
-    )
+    .filter((item) => item && !isExcludedItem(item, player.archetype))
+    .map((item) => scoreItem(item, scoringContext))
     .sort((left, right) => right.totalScore - left.totalScore);
 
   const bootPoolIds = unique(externalBuild?.bootIds || []).filter((itemId) => staticData.items[itemId]);
   const scoredBoots = !hasBoots
     ? bootPoolIds
         .map((itemId) => staticData.items[itemId])
-        .filter((item) => item && !isExcludedItem(item, self.archetype))
-        .map((item) =>
-          scoreItem(item, {
-            self,
-            ownedIds,
-            enemyField,
-            needs,
-            gameMinutes,
-            phase,
-            liveSignal,
-            hasBoots,
-            prefersMagic,
-            version: staticData.version
-          })
-        )
+        .filter((item) => item && !isExcludedItem(item, player.archetype))
+        .map((item) => scoreItem(item, scoringContext))
         .sort((left, right) => right.totalScore - left.totalScore)
     : [];
   const bestBoot = !hasBoots ? scoredBoots[0] || null : null;
   const recommendations = scoredItems
     .filter((result) => !result.isBoots)
     .filter((result) => result.totalScore > 7)
-    .slice(0, 6);
-  const replacement =
-    fullBuild
-      ? buildReplacementRecommendation(self, scoredItems.filter((result) => !result.isBoots), staticData.items, staticData, {
-          self,
-          ownedIds,
-          enemyField,
-          needs,
-          gameMinutes,
-          phase,
-          liveSignal,
-          hasBoots,
-          prefersMagic,
-          version: staticData.version
-        })
-      : null;
-
-  const topThreatShare = enemyField.topThreat
-    ? enemyField.topThreat.threatScore / enemyField.totalThreat
-    : 0;
+    .slice(0, recommendationLimit);
+  const replacement = fullBuild
+    ? buildReplacementRecommendation(player, scoredItems.filter((result) => !result.isBoots), staticData.items, staticData, scoringContext)
+    : null;
 
   return {
-    patch: staticData.version,
-    gameActive: true,
-    game: {
-      mode: rawGame.gameData?.gameMode || "CLASSIC",
-      seconds: Number(rawGame.gameData?.gameTime || 0),
-      minutes: gameMinutes,
-      phase,
-      liveSignal
-    },
-    player: {
-      summonerName: self.name,
-      championName: self.championName,
-      archetype: self.archetype,
-      gold: needs.gold,
-      level: self.level,
-      fullBuild,
-      armor: needs.armor,
-      mr: needs.mr,
-      health: needs.health,
-      items: buildSlotItemIds.map((itemId) => {
-        const item = staticData.items[itemId];
-        return item
-          ? {
-              id: itemId,
-              name: item.name,
-              imageUrl: `https://ddragon.leagueoflegends.com/cdn/${staticData.version}/img/item/${item.image.full}`
-            }
-          : null;
-      }).filter(Boolean)
-    },
-    enemyTeam: {
-      adShare: enemyField.physicalShare,
-      apShare: enemyField.magicShare,
-      healingPressure: clamp(enemyField.healingPressure, 0, 1.2),
-      topThreat: liveSignal >= 0.35 && enemyField.topThreat
-        ? {
-            championName: enemyField.topThreat.championName,
-            score: enemyField.topThreat.threatScore,
-            kills: enemyField.topThreat.kills,
-            deaths: enemyField.topThreat.deaths,
-            assists: enemyField.topThreat.assists,
-            cs: enemyField.topThreat.cs,
-            threatShare: topThreatShare,
-            damageProfile: enemyField.topThreat.damage
-          }
-        : null
-    },
+    player: buildPlayerHeader(player, staticData, needs, fullBuild),
     needs: {
       armorNeed: needs.armorNeed,
       mrNeed: needs.mrNeed,
@@ -1514,14 +1645,14 @@ async function analyzeGame(rawGame, staticData) {
       defenseNeed: needs.defenseNeed
     },
     meta: {
-      modelSummary:
-        liveSignal >= 0.35
-          ? "Mobalytics situational-item pool + live enemy threat + live damage mix + your current stats."
-          : "Mobalytics core/full build pool + your current level, gold, and build state.",
-      source: buildMetaSource(self),
-      pool: liveSignal >= 0.35 ? "situational" : "baseline",
+      modelSummary: shared.liveSignal >= 0.35
+        ? "Mobalytics situational-item pool + live enemy threat + live damage mix + current board state."
+        : "Mobalytics core/full build pool + current level and build state.",
+      source: buildMetaSource(player),
+      pool: shared.liveSignal >= 0.35 ? "situational" : "baseline",
       providerStatus: externalBuild ? "ok" : "fallback",
-      providerError
+      providerError,
+      teammateLabel
     },
     boots: hasBoots
       ? {
@@ -1542,6 +1673,91 @@ async function analyzeGame(rawGame, staticData) {
           },
     replacement,
     recommendations
+  };
+}
+
+async function analyzeGame(rawGame, staticData) {
+  const players = (rawGame.allPlayers || []).map((player) => normalizePlayer(player, staticData.champions));
+  const selfName = rawGame.activePlayer?.summonerName || players[0]?.name;
+  const self = players.find((player) => player.name === selfName) || players[0];
+  if (!self) {
+    throw new Error("Could not identify the active player from Live Client Data.");
+  }
+
+  const allies = players.filter((player) => player.team === self.team);
+  const enemies = players.filter((player) => player.team !== self.team);
+  const enemyField = summariseEnemyField(enemies, staticData.items);
+  const gameMinutes = Math.max(1, Number(rawGame.gameData?.gameTime || 0) / 60);
+  const liveSignal = computeLiveSignal(players, enemies, enemyField, staticData.items, gameMinutes);
+  const topThreatShare = enemyField.topThreat ? enemyField.topThreat.threatScore / enemyField.totalThreat : 0;
+  const shared = {
+    enemyField,
+    gameMinutes,
+    liveSignal
+  };
+
+  const selfPerspective = await buildPerspectiveForPlayer(self, staticData, shared, {
+    goldSource: rawGame.activePlayer || {},
+    goldKnown: true,
+    recommendationLimit: 6
+  });
+
+  const premadeMatches = matchPremadesToPlayers(await loadPremadePartyMembers(), allies, self.name);
+  const premades = await Promise.all(
+    premadeMatches.map(async (member) => {
+      const perspective = await buildPerspectiveForPlayer(member.player, staticData, shared, {
+        goldKnown: false,
+        recommendationLimit: 4,
+        teammateLabel: member.label
+      });
+
+      return {
+        partyLabel: member.label,
+        partyPuuid: member.puuid,
+        matchedSummonerName: member.player.name,
+        ...perspective
+      };
+    })
+  );
+
+  return {
+    patch: staticData.version,
+    gameActive: true,
+    game: {
+      mode: rawGame.gameData?.gameMode || "CLASSIC",
+      seconds: Number(rawGame.gameData?.gameTime || 0),
+      minutes: gameMinutes,
+      phase: deriveBuildPhase(self.level, gameMinutes),
+      liveSignal
+    },
+    player: selfPerspective.player,
+    enemyTeam: {
+      adShare: enemyField.physicalShare,
+      apShare: enemyField.magicShare,
+      healingPressure: clamp(enemyField.healingPressure, 0, 1.2),
+      topThreat: liveSignal >= 0.35 && enemyField.topThreat
+        ? {
+            championName: enemyField.topThreat.championName,
+            score: enemyField.topThreat.threatScore,
+            kills: enemyField.topThreat.kills,
+            deaths: enemyField.topThreat.deaths,
+            assists: enemyField.topThreat.assists,
+            cs: enemyField.topThreat.cs,
+            threatShare: topThreatShare,
+            damageProfile: enemyField.topThreat.damage
+          }
+        : null
+    },
+    needs: selfPerspective.needs,
+    meta: selfPerspective.meta,
+    boots: selfPerspective.boots,
+    replacement: selfPerspective.replacement,
+    recommendations: selfPerspective.recommendations,
+    premades: {
+      detected: premades.length > 0,
+      count: premades.length,
+      members: premades
+    }
   };
 }
 
