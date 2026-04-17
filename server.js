@@ -426,6 +426,14 @@ function computeAntiHealFit(item, context) {
   return fit;
 }
 
+function buildProviderRankMap(itemIds) {
+  const rankMap = {};
+  unique(itemIds).forEach((itemId, index) => {
+    rankMap[itemId] = index;
+  });
+  return rankMap;
+}
+
 function decodeHtmlEntities(text) {
   return String(text || "")
     .replace(/&#x27;/gi, "'")
@@ -548,8 +556,8 @@ function getMetaBuildCacheFile(slug) {
   return path.join(getCacheDir(), `mobalytics-build-${slug}.json`);
 }
 
-function readFreshMetaBuild(slug) {
-  const filePath = getMetaBuildCacheFile(slug);
+function readFreshMetaBuild(cacheKey) {
+  const filePath = getMetaBuildCacheFile(cacheKey);
   const cached = readJsonIfPresent(filePath);
   if (!cached || !cached.fetchedAt) {
     return null;
@@ -571,38 +579,117 @@ function extractSectionItemIds(html, headingText, { maxChars = 7000, limit = 12 
   return unique(matches).slice(0, limit);
 }
 
+function normalizeBuildRole(value) {
+  const token = normalizeToken(value);
+  if (!token) {
+    return null;
+  }
+  if (token === "utility" || token === "support" || token === "sup") {
+    return "support";
+  }
+  if (token === "jungle" || token === "jg") {
+    return "jungle";
+  }
+  if (token === "middle" || token === "mid") {
+    return "mid";
+  }
+  if (token === "top") {
+    return "top";
+  }
+  if (token === "bottom" || token === "bot" || token === "adc") {
+    return "adc";
+  }
+  return null;
+}
+
+function isJungleIncomeItem(item) {
+  if (!item) {
+    return false;
+  }
+  const lower = item.features?.lowerText || "";
+  return (
+    lower.includes("scorchclaw pup") ||
+    lower.includes("gustwalker hatchling") ||
+    lower.includes("mosstomper seedling")
+  );
+}
+
+function hasJungleProfile(self, itemMap) {
+  const positionRole = normalizeBuildRole(self.position);
+  if (positionRole === "jungle") {
+    return true;
+  }
+  return self.items.some((itemId) => isJungleIncomeItem(itemMap[itemId]));
+}
+
+function resolveBuildRole(player, itemMap) {
+  if (hasSupportProfile(player, itemMap)) {
+    return "support";
+  }
+  if (hasJungleProfile(player, itemMap)) {
+    return "jungle";
+  }
+  return normalizeBuildRole(player.position);
+}
+
 async function loadMobalyticsBuild(player, staticData) {
   const championId = player.champion?.id || player.championName;
   const slug = championSlug(championId);
-  const cached = readFreshMetaBuild(slug);
-  if (cached) {
-    return cached;
+  const role = resolveBuildRole(player, staticData.items);
+  const roleCacheKey = role ? `${slug}-${role}` : null;
+  if (roleCacheKey) {
+    const roleCached = readFreshMetaBuild(roleCacheKey);
+    if (roleCached) {
+      return roleCached;
+    }
+  } else {
+    const genericCached = readFreshMetaBuild(slug);
+    if (genericCached) {
+      return genericCached;
+    }
   }
 
   ensureDir(getCacheDir());
-  const url = `https://mobalytics.gg/lol/champions/${slug}/build`;
-  const html = await httpGetText(url, { timeoutMs: 9000 });
-  const coreIds = extractSectionItemIds(html, "Core Items", { maxChars: 4000, limit: 6 });
-  const fullBuildIds = extractSectionItemIds(html, "Full Build", { maxChars: 5000, limit: 8 });
-  const situationalIds = extractSectionItemIds(html, "situational items", { maxChars: 3500, limit: 8 });
+  const pathSuffixes = unique([role, null]);
+  let lastError = null;
 
-  if (!coreIds.length && !fullBuildIds.length && !situationalIds.length) {
-    throw new Error(`Unable to parse Mobalytics build data for ${player.championName}.`);
+  for (const pathSuffix of pathSuffixes) {
+    const url = pathSuffix
+      ? `https://mobalytics.gg/lol/champions/${slug}/build/${pathSuffix}`
+      : `https://mobalytics.gg/lol/champions/${slug}/build`;
+
+    try {
+      const html = await httpGetText(url, { timeoutMs: 9000 });
+      const coreIds = extractSectionItemIds(html, "Core Items", { maxChars: 4000, limit: 6 });
+      const fullBuildIds = extractSectionItemIds(html, "Full Build", { maxChars: 5000, limit: 8 });
+      const situationalIds = extractSectionItemIds(html, "situational items", { maxChars: 3500, limit: 8 });
+
+      if (!coreIds.length && !fullBuildIds.length && !situationalIds.length) {
+        lastError = new Error(`Unable to parse Mobalytics build data for ${player.championName}${pathSuffix ? ` ${pathSuffix}` : ""}.`);
+        continue;
+      }
+
+      const payload = {
+        provider: "Mobalytics",
+        url,
+        fetchedAt: Date.now(),
+        champion: decodeHtmlEntities(player.championName),
+        role,
+        resolvedRole: pathSuffix,
+        coreIds,
+        fullBuildIds,
+        situationalIds,
+        bootIds: unique([...coreIds, ...fullBuildIds]).filter((itemId) => staticData.items[itemId]?.features?.isBoots)
+      };
+
+      writeJson(getMetaBuildCacheFile(pathSuffix ? `${slug}-${pathSuffix}` : slug), payload);
+      return payload;
+    } catch (error) {
+      lastError = error;
+    }
   }
 
-  const payload = {
-    provider: "Mobalytics",
-    url,
-    fetchedAt: Date.now(),
-    champion: decodeHtmlEntities(player.championName),
-    coreIds,
-    fullBuildIds,
-    situationalIds,
-    bootIds: unique([...coreIds, ...fullBuildIds]).filter((itemId) => staticData.items[itemId]?.features?.isBoots)
-  };
-
-  writeJson(getMetaBuildCacheFile(slug), payload);
-  return payload;
+  throw lastError || new Error(`Unable to load Mobalytics build data for ${player.championName}.`);
 }
 
 async function loadStaticData() {
@@ -893,11 +980,15 @@ function getStat(source, keys, fallback = 0) {
 function buildMetaSource(player) {
   const championId = player.champion?.id || player.championName;
   const slug = championSlug(championId);
+  const role = resolveBuildRole(player, cache.staticData?.items || {});
+  const url = role
+    ? `https://mobalytics.gg/lol/champions/${slug}/build/${role}`
+    : `https://mobalytics.gg/lol/champions/${slug}/build`;
   return {
     provider: "Mobalytics",
-    label: `${player.championName} build page`,
-    url: `https://mobalytics.gg/lol/champions/${slug}/build`,
-    note: "Candidate pool is constrained to this provider's build lists."
+    label: `${player.championName}${role ? ` ${role}` : ""} build page`,
+    url,
+    note: `Candidate pool is constrained to this provider's${role ? ` ${role}` : ""} build lists.`
   };
 }
 
@@ -1620,6 +1711,7 @@ function scoreItem(item, context) {
   const lowerName = item.name.toLowerCase();
   const antiHealFit = computeAntiHealFit(item, context);
   const antiHealWeight = Math.max(liveWeight, enemyField.antiHealPriority >= 0.55 ? 0.28 : 0);
+  const providerRank = context.providerRankMap?.[item.id];
 
   let base = 0;
   base += (stats.ad / 40) * weights.ad * 10;
@@ -1687,7 +1779,30 @@ function scoreItem(item, context) {
 
   let progressionBonus = 0;
   const ownedComponents = countOwnedComponents(item, ownedIds);
-  progressionBonus += ownedComponents * 2.4;
+  const componentBonus = ownedComponents * 2.4;
+  progressionBonus += componentBonus;
+  let providerBonus = 0;
+  if (Number.isInteger(providerRank)) {
+    const providerRankWeight =
+      context.poolKind === "baseline"
+        ? context.completedCoreItems === 0 && liveWeight < 0.35
+          ? 7.4
+          : liveWeight < 0.35
+            ? 4.6
+          : 1.5
+        : context.poolKind === "support-blend"
+          ? 2
+          : 1.1;
+    providerBonus += Math.max(0, 6 - providerRank) * providerRankWeight;
+    if (context.poolKind === "baseline" && context.completedCoreItems === 0 && liveWeight < 0.35) {
+      if (providerRank === 0) {
+        providerBonus += 28;
+      } else if (providerRank === 1) {
+        providerBonus += 8;
+      }
+    }
+  }
+  progressionBonus += providerBonus;
 
   const missingGold = needs.goldKnown ? Math.max(0, Number(item.gold.total || 0) - Number(needs.gold || 0)) : null;
   const affordabilityBonus = needs.goldKnown ? clamp(5 - missingGold / 450, 0, 5) : 0;
@@ -1756,6 +1871,8 @@ function scoreItem(item, context) {
     counterScore,
     topThreatBonus,
     progressionBonus,
+    componentBonus,
+    providerBonus,
     affordabilityBonus,
     bootsModifier
   });
@@ -1824,8 +1941,13 @@ function buildReasons(item, context, breakdown) {
     );
   }
 
-  if (breakdown.progressionBonus >= 2.4) {
+  if (breakdown.componentBonus >= 2.4) {
     reasons.push("You already own part of the build path, so this is a clean tempo continuation.");
+  }
+
+  const providerRank = context.providerRankMap?.[item.id];
+  if (lowSignal && breakdown.providerBonus >= 6 && Number.isInteger(providerRank) && providerRank <= 1 && reasons.length < 3) {
+    reasons.push(`This is one of the top ${context.metaRoleLabel || ""} meta build path items from the provider list.`.replace("  ", " ").trim());
   }
 
   if (context.needs.goldKnown && breakdown.affordabilityBonus >= 3.5) {
@@ -2006,6 +2128,7 @@ async function buildPerspectiveForPlayer(player, staticData, shared, options = {
         : situationalPoolIds;
   const fallbackPoolIds = unique(Object.keys(staticData.items).filter((itemId) => !staticData.items[itemId].features.isBoots));
   const candidatePoolIds = preferredPoolIds.length ? preferredPoolIds : fallbackPoolIds;
+  const poolKind = supportMergedPoolIds?.length ? "support-blend" : shared.liveSignal >= 0.35 ? "situational" : "baseline";
 
   const scoringContext = {
     self: player,
@@ -2018,7 +2141,11 @@ async function buildPerspectiveForPlayer(player, staticData, shared, options = {
     hasBoots,
     isSupportProfile: supportProfile,
     prefersMagic,
-    version: staticData.version
+    version: staticData.version,
+    poolKind,
+    providerRankMap: buildProviderRankMap(candidatePoolIds),
+    metaRoleLabel: externalBuild?.resolvedRole || externalBuild?.role || resolveBuildRole(player, staticData.items) || "",
+    completedCoreItems
   };
 
   const scoredItems = candidatePoolIds
@@ -2060,7 +2187,7 @@ async function buildPerspectiveForPlayer(player, staticData, shared, options = {
           : `Mobalytics situational-item pool + live enemy threat + live damage mix + current board state${antiHealOverrideIds.length ? " + targeted anti-heal overrides." : "."}`
         : `Mobalytics core/full build pool + current level and build state${antiHealOverrideIds.length ? " + targeted anti-heal overrides." : "."}`,
       source: buildMetaSource(player),
-      pool: supportMergedPoolIds?.length ? "support-blend" : shared.liveSignal >= 0.35 ? "situational" : "baseline",
+      pool: poolKind,
       providerStatus: externalBuild ? "ok" : "fallback",
       providerError,
       teammateLabel
