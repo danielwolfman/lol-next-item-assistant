@@ -12,6 +12,7 @@ const PATCH_FILE = path.join(CACHE_DIR, "patch-version.json");
 const ITEMS_FILE = path.join(CACHE_DIR, "item-data.json");
 const CHAMPIONS_FILE = path.join(CACHE_DIR, "champion-data.json");
 const META_BUILD_TTL_MS = 1000 * 60 * 60 * 6;
+const REPLACEMENT_SCORE_THRESHOLD = 8;
 const PARTY_CACHE_TTL_MS = 1000 * 15;
 const LCU_LOCKFILE_PATHS = [
   "C:\\ProgramData\\Riot Games\\Metadata\\league_of_legends.live\\league_of_legends.live.lockfile",
@@ -1525,6 +1526,26 @@ function buildReplacementRecommendation(self, scoredItems, itemMap, staticData, 
   }
 
   const scoreGain = candidate.totalScore - currentItem.totalScore;
+  if (scoreGain < REPLACEMENT_SCORE_THRESHOLD) {
+    return {
+      active: false,
+      perfectBuild: true,
+      scoreGain,
+      hold: {
+        itemId: currentItem.itemId,
+        name: currentItem.name,
+        imageUrl: currentItem.imageUrl,
+        totalScore: currentItem.totalScore
+      },
+      candidate,
+      reasons: [
+        `Your current six-item setup is already within the hold threshold of the best swap candidate.`,
+        `${candidate.name} is only ${scoreGain >= 0 ? "+" : ""}${scoreGain.toFixed(1)} ahead of ${currentItem.name}, so this is not a forced sell.`,
+        "Treat this as a stable full build unless the enemy threat profile changes."
+      ]
+    };
+  }
+
   return {
     active: true,
     sell: {

@@ -241,6 +241,15 @@ function renderReplacement(payload) {
     return;
   }
 
+  if (payload.replacement && payload.replacement.perfectBuild) {
+    replacementState.textContent = "Build stable";
+    const stable = document.createElement("div");
+    stable.className = "reason-list";
+    stable.innerHTML = payload.replacement.reasons.map((reason) => `<p>${reason}</p>`).join("");
+    replacementBody.appendChild(stable);
+    return;
+  }
+
   replacementState.textContent = "No better swap";
   const empty = document.createElement("div");
   empty.className = "reason-list";
