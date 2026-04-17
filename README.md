@@ -1,6 +1,6 @@
-﻿# LoL Next Item Assistant
+﻿# LoL Item Coach
 
-![LoL Next Item Assistant icon](build/icon.png)
+![LoL Item Coach icon](build/icon.png)
 
 This is an Electron desktop assistant for League of Legends. It reads Riot's local Live Client API on `https://127.0.0.1:2999/liveclientdata/allgamedata`, then ranks item options from:
 

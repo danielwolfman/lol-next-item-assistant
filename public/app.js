@@ -1,5 +1,4 @@
 const refreshBtn = document.getElementById("refresh-btn");
-const mockBtn = document.getElementById("mock-btn");
 const statusText = document.getElementById("status-text");
 const statusDetail = document.getElementById("status-detail");
 const statusCard = document.getElementById("status-card");
@@ -19,7 +18,6 @@ const threatStats = document.getElementById("threat-stats");
 const threatDamage = document.getElementById("threat-damage");
 const metaLine = document.getElementById("meta-line");
 
-let currentMode = "live";
 let refreshTimer = null;
 
 function formatGold(value) {
@@ -102,12 +100,7 @@ function renderStatLine(stats) {
 }
 
 function renderState(payload) {
-  setStatus(
-    payload.source === "mock"
-      ? "Mock match loaded."
-      : `Live feed connected on patch ${payload.patch}.`,
-    `Game time ${formatGameTime(payload.game.seconds)} • ${payload.player.gold} current gold`
-  );
+  setStatus(`Live feed connected on patch ${payload.patch}.`, `Game time ${formatGameTime(payload.game.seconds)} • ${payload.player.gold} current gold`);
 
   summaryGrid.classList.remove("hidden");
   recommendationsSection.classList.remove("hidden");
@@ -141,10 +134,9 @@ function renderState(payload) {
   });
 }
 
-async function loadState(mode = currentMode) {
-  currentMode = mode;
+async function loadState() {
   try {
-    const response = await fetch(`/api/state${mode === "mock" ? "?mock=1" : ""}`);
+    const response = await fetch("/api/state");
     const payload = await response.json();
 
     if (!payload.ok) {
@@ -167,14 +159,11 @@ function startPolling() {
     clearInterval(refreshTimer);
   }
   refreshTimer = setInterval(() => {
-    if (currentMode === "live") {
-      loadState("live");
-    }
+    loadState();
   }, 4000);
 }
 
-refreshBtn.addEventListener("click", () => loadState(currentMode));
-mockBtn.addEventListener("click", () => loadState("mock"));
+refreshBtn.addEventListener("click", () => loadState());
 
-loadState("live");
+loadState();
 startPolling();

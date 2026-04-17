@@ -728,16 +728,51 @@ function summariseEnemyField(enemies, itemMap) {
   };
 }
 
-function classifyNeeds(self, activePlayer, enemyField, gameMinutes) {
+function deriveBuildPhase(level, gameMinutes) {
+  if (level <= 6 || gameMinutes < 9) {
+    return "lane";
+  }
+  if (level <= 12 || gameMinutes < 22) {
+    return "mid";
+  }
+  return "late";
+}
+
+function computeLiveSignal(players, enemies, enemyField, itemMap, gameMinutes) {
+  const totalKills = players.reduce((sum, player) => sum + player.kills, 0);
+  const totalCompletedItems = players.reduce(
+    (sum, player) => sum + player.items.filter((itemId) => Number(itemMap[itemId]?.gold?.total || 0) >= 2200).length,
+    0
+  );
+  const enemyKillLead = enemies.length ? Math.max(...enemies.map((player) => player.kills - player.deaths), 0) : 0;
+  const sortedThreats = enemyField.players.slice().sort((left, right) => right.threatScore - left.threatScore);
+  const topThreatGap =
+    sortedThreats.length >= 2
+      ? clamp((sortedThreats[0].threatScore - sortedThreats[1].threatScore) / 10, 0, 1)
+      : 0;
+  const timeSignal = clamp((gameMinutes - 6) / 10, 0, 1);
+  const killSignal = clamp(totalKills / 18, 0, 1);
+  const itemSignal = clamp(totalCompletedItems / 8, 0, 1);
+  const snowballSignal = clamp(enemyKillLead / 4, 0, 1);
+
+  return clamp(
+    timeSignal * 0.34 + killSignal * 0.28 + itemSignal * 0.18 + topThreatGap * 0.12 + snowballSignal * 0.08,
+    0,
+    1
+  );
+}
+
+function classifyNeeds(self, activePlayer, enemyField, gameMinutes, liveSignal) {
   const armor = getStat(activePlayer?.championStats || {}, ["armor"], self.championStats.armor);
   const mr = getStat(activePlayer?.championStats || {}, ["magicResist", "spellBlock", "mr"], self.championStats.mr);
   const health = getStat(activePlayer?.championStats || {}, ["maxHealth", "health"], self.championStats.health);
   const gold = Number(activePlayer?.currentGold || 0);
   const deathsPressure = Math.max(0, self.deaths - self.kills + 1) * 0.18;
   const topThreatShare = enemyField.topThreat ? enemyField.topThreat.threatScore / enemyField.totalThreat : 0.2;
-  const dangerIndex = deathsPressure + topThreatShare * 0.9;
-  const armorNeed = clamp((enemyField.physicalShare * 170 - armor) / 110 + dangerIndex, 0, 1.7);
-  const mrNeed = clamp((enemyField.magicShare * 150 - mr) / 100 + dangerIndex * 0.9, 0, 1.7);
+  const reactiveThreat = topThreatShare * liveSignal;
+  const dangerIndex = deathsPressure + reactiveThreat * 0.9;
+  const armorNeed = clamp((enemyField.physicalShare * 170 - armor) / 110 * liveSignal + dangerIndex, 0, 1.7);
+  const mrNeed = clamp((enemyField.magicShare * 150 - mr) / 100 * liveSignal + dangerIndex * 0.9, 0, 1.7);
   const healthNeed = clamp((gameMinutes * 70 - health) / 1300 + dangerIndex * 0.7, 0, 1.5);
 
   return {
@@ -806,6 +841,75 @@ function isExcludedItem(item, selfArchetype) {
   return false;
 }
 
+function computePhaseBonus(item, context) {
+  const lower = item.name.toLowerCase();
+  const stats = item.stats;
+  const feature = item.features;
+  const phase = context.phase;
+  const archetype = context.self.archetype;
+  let bonus = 0;
+
+  if (phase === "lane") {
+    if (archetype === "mage" || archetype === "ap-assassin") {
+      if (stats.ap >= 80) {
+        bonus += 4.5;
+      }
+      if (stats.mana >= 300 || feature.hasAbilityHaste || feature.hasMagicPen) {
+        bonus += 2.2;
+      }
+      if (stats.armor + stats.mr >= 40 && stats.ap < 70 && !feature.hasStasis) {
+        bonus -= 10;
+      }
+    } else if (archetype === "marksman") {
+      if (stats.ad >= 40 || stats.attackSpeed >= 25 || stats.crit >= 25) {
+        bonus += 4.2;
+      }
+      if (stats.armor + stats.mr >= 40 && stats.ad + stats.attackSpeed < 35) {
+        bonus -= 9;
+      }
+    } else if (archetype === "tank") {
+      if (stats.health >= 300 || stats.armor >= 35 || stats.mr >= 35) {
+        bonus += 5;
+      }
+    } else if (archetype === "enchanter") {
+      if (stats.mana >= 300 || feature.hasAbilityHaste || feature.hasHealShieldPower) {
+        bonus += 4.8;
+      }
+    } else {
+      if (stats.health >= 250 || stats.ad >= 35 || stats.ap >= 70) {
+        bonus += 3.4;
+      }
+      if (feature.hasAbilityHaste) {
+        bonus += 1.4;
+      }
+    }
+
+    if (item.gold.total >= 3400 && countOwnedComponents(item, context.ownedIds) === 0) {
+      bonus -= 3.5;
+    }
+  }
+
+  if (phase === "mid") {
+    if (feature.hasAbilityHaste) {
+      bonus += 1.2;
+    }
+    if (item.gold.total >= 3000) {
+      bonus += 1.1;
+    }
+  }
+
+  if (phase === "late") {
+    if (item.gold.total >= 3200) {
+      bonus += 2.8;
+    }
+    if (lower.includes("deathcap") || lower.includes("infinity edge") || lower.includes("void")) {
+      bonus += 1.6;
+    }
+  }
+
+  return bonus;
+}
+
 function scoreItem(item, context) {
   const weights = ARCHETYPE_WEIGHTS[context.self.archetype] || ARCHETYPE_WEIGHTS.fighter;
   const ownedIds = context.ownedIds;
@@ -814,6 +918,7 @@ function scoreItem(item, context) {
   const enemyField = context.enemyField;
   const needs = context.needs;
   const topThreat = enemyField.topThreat;
+  const liveWeight = context.liveSignal;
 
   let base = 0;
   base += (stats.ad / 40) * weights.ad * 10;
@@ -847,23 +952,25 @@ function scoreItem(item, context) {
   if (feature.hasStasis) {
     base += weights.feature.stasis || 0;
   }
+  const phaseBonus = computePhaseBonus(item, context);
 
   const adCounterValue = (stats.armor / 35) * 7.2 + (stats.health / 350) * 3.6 + (feature.hasStasis ? 5.5 : 0);
   const apCounterValue = (stats.mr / 35) * 7.2 + (stats.health / 350) * 3.5 + (feature.hasShield ? 1.2 : 0);
   const antiHealValue = feature.hasGrievousWounds ? 5.2 : 0;
 
   const counterScore =
-    adCounterValue * enemyField.physicalShare * needs.armorNeed * needs.defenseNeed +
-    apCounterValue * enemyField.magicShare * needs.mrNeed * needs.defenseNeed +
-    antiHealValue * clamp(enemyField.healingPressure, 0, 1.2);
+    (adCounterValue * enemyField.physicalShare * needs.armorNeed * needs.defenseNeed +
+      apCounterValue * enemyField.magicShare * needs.mrNeed * needs.defenseNeed +
+      antiHealValue * clamp(enemyField.healingPressure, 0, 1.2)) *
+    liveWeight;
 
   let topThreatBonus = 0;
-  if (topThreat) {
+  if (topThreat && liveWeight >= 0.35) {
     const threatIsPhysical = topThreat.damage.physical >= topThreat.damage.magic;
     if (threatIsPhysical) {
-      topThreatBonus += adCounterValue * (topThreat.threatScore / enemyField.totalThreat) * 0.9;
+      topThreatBonus += adCounterValue * (topThreat.threatScore / enemyField.totalThreat) * 0.9 * liveWeight;
     } else {
-      topThreatBonus += apCounterValue * (topThreat.threatScore / enemyField.totalThreat) * 0.9;
+      topThreatBonus += apCounterValue * (topThreat.threatScore / enemyField.totalThreat) * 0.9 * liveWeight;
     }
   }
 
@@ -879,10 +986,10 @@ function scoreItem(item, context) {
     bootsModifier += !context.hasBoots && context.gameMinutes >= 6 ? 4.5 : -18;
     const lowerName = item.name.toLowerCase();
     if (lowerName.includes("steelcaps")) {
-      bootsModifier += enemyField.physicalShare * needs.armorNeed * 8;
+      bootsModifier += enemyField.physicalShare * needs.armorNeed * 8 * liveWeight;
     }
     if (lowerName.includes("mercury")) {
-      bootsModifier += enemyField.magicShare * needs.mrNeed * 8;
+      bootsModifier += enemyField.magicShare * needs.mrNeed * 8 * liveWeight;
     }
     if (lowerName.includes("sorcer")) {
       bootsModifier += context.prefersMagic ? 6 : -4;
@@ -916,9 +1023,11 @@ function scoreItem(item, context) {
     penalties -= 18;
   }
 
-  const totalScore = base + counterScore + topThreatBonus + progressionBonus + affordabilityBonus + bootsModifier + penalties;
+  const totalScore =
+    base + phaseBonus + counterScore + topThreatBonus + progressionBonus + affordabilityBonus + bootsModifier + penalties;
   const reasons = buildReasons(item, context, {
     base,
+    phaseBonus,
     counterScore,
     topThreatBonus,
     progressionBonus,
@@ -943,6 +1052,15 @@ function buildReasons(item, context, breakdown) {
   const reasons = [];
   const topThreat = context.enemyField.topThreat;
   const lowerName = item.name.toLowerCase();
+  const lowSignal = context.liveSignal < 0.35;
+
+  if (lowSignal && breakdown.phaseBonus >= 2.5) {
+    if (context.phase === "lane") {
+      reasons.push(`Low-signal lane phase, so this stays on a standard level ${context.self.level} meta curve.`);
+    } else {
+      reasons.push("Game state is still low-signal, so this leans on the standard build curve first.");
+    }
+  }
 
   if (breakdown.base >= 12) {
     if (context.self.archetype === "mage" || context.self.archetype === "ap-assassin") {
@@ -956,7 +1074,7 @@ function buildReasons(item, context, breakdown) {
     }
   }
 
-  if (breakdown.counterScore >= 7.5) {
+  if (!lowSignal && breakdown.counterScore >= 7.5) {
     if (context.enemyField.physicalShare >= context.enemyField.magicShare && item.stats.armor > 0) {
       reasons.push(
         `Enemy comp is ${Math.round(context.enemyField.physicalShare * 100)}% AD by threat, so armor pays off now.`
@@ -970,7 +1088,7 @@ function buildReasons(item, context, breakdown) {
     }
   }
 
-  if ((breakdown.topThreatBonus >= 2.5 || item.features.hasStasis) && topThreat) {
+  if (!lowSignal && (breakdown.topThreatBonus >= 2.5 || item.features.hasStasis) && topThreat) {
     const threatType = topThreat.damage.physical >= topThreat.damage.magic ? "physical" : "magic";
     reasons.push(
       `${topThreat.championName} is the biggest current threat at ${topThreat.kills}/${topThreat.deaths}/${topThreat.assists}, and this item helps into ${threatType} burst.`
@@ -1013,7 +1131,9 @@ function analyzeGame(rawGame, staticData) {
   const enemies = players.filter((player) => player.team !== self.team);
   const enemyField = summariseEnemyField(enemies, staticData.items);
   const gameMinutes = Math.max(1, Number(rawGame.gameData?.gameTime || 0) / 60);
-  const needs = classifyNeeds(self, rawGame.activePlayer || {}, enemyField, gameMinutes);
+  const phase = deriveBuildPhase(self.level, gameMinutes);
+  const liveSignal = computeLiveSignal(players, enemies, enemyField, staticData.items, gameMinutes);
+  const needs = classifyNeeds(self, rawGame.activePlayer || {}, enemyField, gameMinutes, liveSignal);
   const ownedIds = new Set(self.items);
   const hasBoots = ownsBoots(self, staticData.items);
   const prefersMagic =
@@ -1028,6 +1148,8 @@ function analyzeGame(rawGame, staticData) {
         enemyField,
         needs,
         gameMinutes,
+        phase,
+        liveSignal,
         hasBoots,
         prefersMagic,
         version: staticData.version
@@ -1046,7 +1168,9 @@ function analyzeGame(rawGame, staticData) {
     game: {
       mode: rawGame.gameData?.gameMode || "CLASSIC",
       seconds: Number(rawGame.gameData?.gameTime || 0),
-      minutes: gameMinutes
+      minutes: gameMinutes,
+      phase,
+      liveSignal
     },
     player: {
       summonerName: self.name,
@@ -1072,7 +1196,7 @@ function analyzeGame(rawGame, staticData) {
       adShare: enemyField.physicalShare,
       apShare: enemyField.magicShare,
       healingPressure: clamp(enemyField.healingPressure, 0, 1.2),
-      topThreat: enemyField.topThreat
+      topThreat: liveSignal >= 0.35 && enemyField.topThreat
         ? {
             championName: enemyField.topThreat.championName,
             score: enemyField.topThreat.threatScore,
@@ -1195,7 +1319,10 @@ function startServer(port = PORT) {
 
 module.exports = {
   startServer,
-  createServer
+  createServer,
+  analyzeGame,
+  loadStaticData,
+  getMockGameData
 };
 
 if (require.main === module) {

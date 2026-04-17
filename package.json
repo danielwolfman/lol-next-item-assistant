@@ -1,7 +1,7 @@
 {
-  "name": "lol-next-item-assistant",
+  "name": "lol-item-coach",
   "version": "0.2.1",
-  "description": "Electron desktop assistant that recommends the next League of Legends item during a live game.",
+  "description": "Electron desktop app that recommends the next League of Legends item during a live game.",
   "author": "Codex",
   "main": "main.js",
   "scripts": {
@@ -11,8 +11,8 @@
     "dist": "electron-builder --win msi"
   },
   "build": {
-    "appId": "com.codex.lolnextitemassistant",
-    "productName": "LoL Next Item Assistant",
+    "appId": "com.codex.lolitemcoach",
+    "productName": "LoL Item Coach",
     "asar": true,
     "icon": "build/icon.ico",
     "directories": {

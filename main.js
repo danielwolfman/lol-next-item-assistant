@@ -8,7 +8,7 @@ const APP_PORT = 3210;
 const WINDOW_ICON = path.join(__dirname, "build", "icon.png");
 
 function registerStartup() {
-  if (process.platform !== "win32") {
+  if (process.platform !== "win32" || !app.isPackaged) {
     return;
   }
 
@@ -28,7 +28,7 @@ function createWindow() {
     backgroundColor: "#07131c",
     icon: WINDOW_ICON,
     autoHideMenuBar: true,
-    title: "LoL Next Item Assistant",
+    title: "LoL Item Coach",
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false
