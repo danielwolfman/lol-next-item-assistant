@@ -227,6 +227,10 @@ function normalizeToken(value) {
   return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+function championSlug(value) {
+  return normalizeToken(value);
+}
+
 function readJsonIfPresent(filePath) {
   if (!fs.existsSync(filePath)) {
     return null;
@@ -562,6 +566,17 @@ function getStat(source, keys, fallback = 0) {
     }
   }
   return fallback;
+}
+
+function buildMetaSource(player) {
+  const championId = player.champion?.id || player.championName;
+  const slug = championSlug(championId);
+  return {
+    provider: "Mobalytics",
+    label: `${player.championName} build page`,
+    url: `https://mobalytics.gg/lol/champions/${slug}`,
+    note: "External meta reference page for the standard build baseline."
+  };
 }
 
 function resolveChampion(rawName, champions) {
@@ -1165,6 +1180,7 @@ function analyzeGame(rawGame, staticData) {
 
   return {
     patch: staticData.version,
+    gameActive: true,
     game: {
       mode: rawGame.gameData?.gameMode || "CLASSIC",
       seconds: Number(rawGame.gameData?.gameTime || 0),
@@ -1216,6 +1232,10 @@ function analyzeGame(rawGame, staticData) {
       damageNeed: needs.damageNeed,
       defenseNeed: needs.defenseNeed
     },
+    meta: {
+      modelSummary: "Class-based prior + live enemy threat + live damage mix + your current stats.",
+      source: buildMetaSource(self)
+    },
     recommendations
   };
 }
@@ -1263,10 +1283,10 @@ async function handleApiState(req, res) {
       } catch (error) {
         sendJson(res, 200, {
           ok: false,
+          gameActive: false,
           source: "live",
           patch: staticData.version,
-          error:
-            "League Live Client API was not reachable on https://127.0.0.1:2999. Start a game, then refresh. You can also open mock mode for a dry run.",
+          error: "League Live Client API was not reachable on https://127.0.0.1:2999. Start a game, then refresh.",
           details: error.message
         });
         return;

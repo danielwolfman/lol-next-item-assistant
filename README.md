@@ -9,6 +9,10 @@ This is an Electron desktop assistant for League of Legends. It reads Riot's loc
 - the most fed enemy right now
 - your current item state and how close you are to finishing an item
 
+The UI also links an external meta reference page for the active champion:
+
+- Mobalytics champion build page
+
 ## Desktop app
 
 1. Open PowerShell in the repository root directory
@@ -36,8 +40,8 @@ node server.js
 
 ## Notes
 
-- If League is not currently in game, the UI will show a connection warning.
-- Use the `Load mock match` button to test the UI without opening League.
+- If League is not currently in game, the app minimizes itself.
+- When a game becomes active, the app restores and focuses itself once.
 - Static Riot patch data is cached in `.cache` after the first run.
 - The app enables Windows startup when it launches.
 
@@ -45,7 +49,7 @@ node server.js
 
 `score = meta-fit + live-counter-fit + fed-threat bonus + build-path bonus + affordability`
 
-This v1 is intentionally heuristic. The "meta" part is not scraped from U.GG/Lolalytics yet; it is a class-based prior derived from Riot champion tags and item stats. That keeps the PoC simple and stable enough to try immediately.
+This v1 is intentionally heuristic. The internal "meta" scorer is still a class-based prior derived from Riot champion tags and item stats. The app now shows a Mobalytics reference link for the active champion so you can compare the live recommendation against a well-known public build source.
 
 ## Packaging
 

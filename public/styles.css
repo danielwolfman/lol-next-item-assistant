@@ -45,6 +45,13 @@ body {
   margin-bottom: 20px;
 }
 
+.meta-copy {
+  display: grid;
+  gap: 6px;
+  justify-items: end;
+  text-align: right;
+}
+
 .eyebrow,
 .panel-label {
   margin: 0 0 8px;
@@ -126,6 +133,14 @@ button:hover {
 
 .muted {
   color: var(--muted);
+}
+
+a {
+  color: #b5e2ff;
+}
+
+a:hover {
+  color: #d8f0ff;
 }
 
 .summary-grid {
@@ -269,5 +284,10 @@ button:hover {
   .section-header {
     flex-direction: column;
     align-items: start;
+  }
+
+  .meta-copy {
+    justify-items: start;
+    text-align: left;
   }
 }

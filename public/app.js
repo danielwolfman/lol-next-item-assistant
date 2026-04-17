@@ -17,6 +17,7 @@ const threatHeading = document.getElementById("threat-heading");
 const threatStats = document.getElementById("threat-stats");
 const threatDamage = document.getElementById("threat-damage");
 const metaLine = document.getElementById("meta-line");
+const metaSource = document.getElementById("meta-source");
 
 let refreshTimer = null;
 
@@ -100,7 +101,10 @@ function renderStatLine(stats) {
 }
 
 function renderState(payload) {
-  setStatus(`Live feed connected on patch ${payload.patch}.`, `Game time ${formatGameTime(payload.game.seconds)} • ${payload.player.gold} current gold`);
+  setStatus(
+    `Live feed connected on patch ${payload.patch}.`,
+    `Game time ${formatGameTime(payload.game.seconds)} • ${Math.round(payload.player.gold)} current gold`
+  );
 
   summaryGrid.classList.remove("hidden");
   recommendationsSection.classList.remove("hidden");
@@ -126,7 +130,19 @@ function renderState(payload) {
     threatDamage.textContent = "-";
   }
 
-  metaLine.textContent = `Model: class-based meta prior + live enemy threat + live damage mix + your current stats.`;
+  metaLine.textContent = `Model: ${payload.meta.modelSummary}`;
+  metaSource.textContent = "";
+  const sourcePrefix = document.createTextNode("Meta reference: ");
+  const sourceLink = document.createElement("a");
+  sourceLink.href = payload.meta.source.url;
+  sourceLink.target = "_blank";
+  sourceLink.rel = "noreferrer";
+  sourceLink.textContent = `${payload.meta.source.provider} ${payload.meta.source.label}`;
+  metaSource.appendChild(sourcePrefix);
+  metaSource.appendChild(sourceLink);
+  if (payload.meta.source.note) {
+    metaSource.appendChild(document.createTextNode(` (${payload.meta.source.note})`));
+  }
 
   recommendationGrid.innerHTML = "";
   payload.recommendations.forEach((rec, index) => {
@@ -142,6 +158,8 @@ async function loadState() {
     if (!payload.ok) {
       recommendationsSection.classList.add("hidden");
       summaryGrid.classList.add("hidden");
+      metaLine.textContent = "";
+      metaSource.textContent = "";
       setStatus("Live feed unavailable.", payload.error || "Unknown error", false);
       return;
     }
@@ -150,6 +168,8 @@ async function loadState() {
   } catch (error) {
     recommendationsSection.classList.add("hidden");
     summaryGrid.classList.add("hidden");
+    metaLine.textContent = "";
+    metaSource.textContent = "";
     setStatus("Request failed.", error.message, false);
   }
 }
